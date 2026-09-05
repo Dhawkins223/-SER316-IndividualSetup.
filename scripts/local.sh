@@ -2,6 +2,44 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+command_name="${1:-help}"
+
+# Keep discovery usable in a clean checkout. Configuration and Docker are
+# runtime prerequisites, not prerequisites for asking what the script does.
+if [[ "$command_name" == "help" || "$command_name" == "--help" || "$command_name" == "-h" ]]; then
+  cat <<'EOF'
+Usage: scripts/local.sh <command>
+
+setup              Install the package and initialize local PostgreSQL.
+dev                Initialize PostgreSQL and start the local research dashboard.
+stop               Stop only the local PostgreSQL service.
+logs               Follow local PostgreSQL logs.
+db-start           Start and health-check local PostgreSQL.
+db-stop            Stop local PostgreSQL without deleting its volume.
+db-status          Show local PostgreSQL service status.
+db-reset           Recreate only the local PostgreSQL volume after confirmation.
+migrate            Apply versioned migrations to the local application database.
+migration-status   Show the current migration status.
+test               Run the full test suite against the isolated test database.
+test-integration   Run PostgreSQL integration tests.
+smoke              Apply migrations and run the application readiness smoke check.
+verify             Run non-destructive configuration, migration, test, and smoke checks.
+research-status    Show worker, connector, and queued operator-message status.
+research-once      Run one research-only cycle for each core worker.
+EOF
+  exit 0
+fi
+
+case "$command_name" in
+  setup|dev|stop|db-stop|logs|db-start|db-status|db-reset|migrate|migration-status|test|test-integration|smoke|verify|research-status|research-once) ;;
+  *) echo "Unknown local workflow command: $command_name" >&2; exit 2 ;;
+esac
+
+if ! command -v docker >/dev/null 2>&1; then
+  echo "Docker is required for the isolated local PostgreSQL service; run this workflow in the repository Codespace." >&2
+  exit 127
+fi
+
 local_env_value() {
   local key="$1"
   local fallback="$2"
@@ -121,29 +159,7 @@ research_once() {
   fi
 }
 
-case "${1:-help}" in
-  help)
-    cat <<'EOF'
-Usage: scripts/local.sh <command>
-
-setup              Install the package and initialize local PostgreSQL.
-dev                Initialize PostgreSQL and start the local research dashboard.
-stop               Stop only the local PostgreSQL service.
-logs               Follow local PostgreSQL logs.
-db-start           Start and health-check local PostgreSQL.
-db-stop            Stop local PostgreSQL without deleting its volume.
-db-status          Show local PostgreSQL service status.
-db-reset           Recreate only the local PostgreSQL volume after confirmation.
-migrate            Apply versioned migrations to the local application database.
-migration-status   Show the current migration status.
-test               Run the full test suite against the isolated test database.
-test-integration   Run PostgreSQL integration tests.
-smoke              Apply migrations and run the application readiness smoke check.
-verify             Run non-destructive configuration, migration, test, and smoke checks.
-research-status    Show worker, connector, and queued operator-message status.
-research-once      Run one research-only cycle for each core worker.
-EOF
-    ;;
+case "$command_name" in
   setup)
     "$python_bin" -m pip install -e "$repo_root"
     migrate
@@ -202,9 +218,5 @@ EOF
     ;;
   research-once)
     research_once
-    ;;
-  *)
-    echo "Unknown local workflow command: $1" >&2
-    exit 2
     ;;
 esac
