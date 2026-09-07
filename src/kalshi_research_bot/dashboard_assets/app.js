@@ -390,6 +390,7 @@ function setMobileMenu(open) {
   if (!mobileMenuToggle || !appSidebar) return;
   appSidebar.classList.toggle("open", open);
   sidebarScrim?.classList.toggle("open", open);
+  if (sidebarScrim) sidebarScrim.hidden = !open;
   mobileMenuToggle.setAttribute("aria-expanded", String(open));
   // Without the scroll lock the page behind kept scrolling under the drawer,
   // which read as the content bleeding through it.
@@ -446,7 +447,7 @@ const mobileSlipToggle = document.querySelector("#mobile-slip-toggle");
 const closePredictionDrawer = document.querySelector("#close-prediction-drawer");
 const mobileSlipMedia = window.matchMedia("(max-width: 900px)");
 const slipBackground = [...document.querySelectorAll(
-  ".app-topbar, .app-sidebar, .workspace, .mobile-bottom-nav, #mobile-slip-toggle"
+  ".app-topbar, .app-sidebar, .workspace, .mobile-bottom-nav, #mobile-slip-toggle, .skip-link"
 )];
 let lastFocusedBeforeSlip = null;
 
@@ -481,10 +482,12 @@ function setMobileSlip(open, restoreFocus = true) {
 if (predictionDrawer && mobileSlipToggle && closePredictionDrawer) {
   function syncMobileSlip() {
     const mobile = mobileSlipMedia.matches;
+    const drawerHadFocus = predictionDrawer.contains(document.activeElement);
     document.body.classList.toggle("slip-enhanced", mobile);
     mobileSlipToggle.hidden = !mobile;
     closePredictionDrawer.hidden = !mobile;
     setMobileSlip(false);
+    if (mobile && drawerHadFocus) mobileSlipToggle.focus();
   }
   syncMobileSlip();
   mobileSlipMedia.addEventListener("change", syncMobileSlip);

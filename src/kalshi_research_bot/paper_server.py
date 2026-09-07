@@ -1589,10 +1589,15 @@ def slip_estimate_display(report: dict) -> tuple[str, str]:
     if value is None or not 0 <= value <= 1:
         return "Unavailable", ""
     interval = analysis.get("hit_probability_interval")
+    if isinstance(interval, (list, tuple)) and len(interval) == 2:
+        low, high = (finite_number(endpoint) for endpoint in interval)
+        interval = [low, high] if low is not None and high is not None and 0 <= low <= high <= 1 else None
+    else:
+        interval = None
     decimals = significant_decimals(interval)
     band = (
         f'<small class="metric-range">95% CI '
-        f'{float(interval[0]) * 100:.{decimals}f}-{float(interval[1]) * 100:.{decimals}f}%</small>'
+        f'{interval[0] * 100:.{decimals}f}-{interval[1] * 100:.{decimals}f}%</small>'
         if interval else ""
     )
     return f"{value * 100:.{decimals}f}%", band

@@ -31,7 +31,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/ms-playwright
-          key: chromium-${{ runner.os }}-playwright-1.62.0
+          key: chromium-${{ runner.os }}-${{ hashFiles('pyproject.toml') }}
       - name: Install Chromium and system libraries
         run: python -m playwright install --with-deps chromium
       - name: Check all dashboard roles, states, and widths

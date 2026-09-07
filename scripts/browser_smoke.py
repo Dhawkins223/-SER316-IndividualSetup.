@@ -81,6 +81,8 @@ def exercise_sheet(page, *, check_a11y: bool) -> None:
     assert drawer.is_visible()
     assert toggle.get_attribute("aria-expanded") == "true"
     assert page.locator("#prediction-drawer-title").evaluate("node => node === document.activeElement")
+    page.locator(".skip-link").evaluate("node => node.focus()")
+    assert drawer.evaluate("node => node.contains(document.activeElement)"), "skip link escaped the modal"
     page.keyboard.press("Shift+Tab")
     assert drawer.evaluate("node => node.contains(document.activeElement)"), "focus escaped the slip"
     page.keyboard.press("Tab")
@@ -100,6 +102,34 @@ def exercise_sheet(page, *, check_a11y: bool) -> None:
     page.locator('.drawer-header a[href="#primary"]').click()
     assert drawer.is_hidden()
     assert page.locator("#primary").evaluate("node => node === document.activeElement")
+
+
+def exercise_navigation(page) -> None:
+    toggle = page.locator("#mobile-menu-toggle")
+    scrim = page.locator("#sidebar-scrim")
+    toggle.click()
+    assert toggle.get_attribute("aria-expanded") == "true"
+    assert scrim.is_visible(), "navigation backdrop is missing"
+    bounds = scrim.bounding_box()
+    scrim.click(position={"x": bounds["width"] - 8, "y": 60})
+    assert toggle.get_attribute("aria-expanded") == "false"
+    assert scrim.is_hidden()
+    assert toggle.evaluate("node => node === document.activeElement")
+
+
+def exercise_responsive_focus(page) -> None:
+    from playwright.sync_api import expect
+
+    page.locator('.drawer-header a[href="#primary"]').focus()
+    page.set_viewport_size({"width": 320, "height": 900})
+    toggle = page.locator("#mobile-slip-toggle")
+    expect(toggle).to_be_focused()
+    toggle.click()
+    page.set_viewport_size({"width": 1440, "height": 900})
+    expect(page.locator("#prediction-drawer-title")).to_be_focused()
+    assert page.locator("#prediction-drawer").is_visible()
+    assert not page.locator(".workspace").evaluate("node => node.inert")
+    assert not page.locator("body").evaluate("node => node.classList.contains('slip-open')")
 
 
 def main() -> int:
@@ -178,12 +208,16 @@ def main() -> int:
                             check_accessibility(page)
                             if width <= 900:
                                 exercise_sheet(page, check_a11y=width == 320)
+                                if state == "live":
+                                    exercise_navigation(page)
                             assert not errors, errors
                         except Exception as error:
                             page.screenshot(path=str(artifact_dir / f"failure-{role}-{state}-{width}.png"), full_page=True)
                             raise AssertionError(f"{label}: {error}") from error
                         if state == "live" and width in {1440, 390}:
                             page.screenshot(path=str(artifact_dir / f"{role}-{width}.png"), full_page=True)
+                        if state == "live" and width == 1440:
+                            exercise_responsive_focus(page)
                         checked.append(label)
                         context.close()
 

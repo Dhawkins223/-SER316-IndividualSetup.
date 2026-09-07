@@ -643,6 +643,18 @@ class ReaderResearchFramingTests(unittest.TestCase):
             self.assertNotRegex(rendered, r'>[^<]* risk</span>')
             self.assertIn("leg count, correlation, and estimated hit probability", rendered)
 
+    def test_compact_estimate_omits_malformed_intervals(self) -> None:
+        from kalshi_research_bot.paper_server import slip_estimate_display
+
+        for interval in (None, [], [0.2], [0.2, 0.3, 0.4], "bad", {0: 0.2, 1: 0.3},
+                         [float("nan"), 0.9], [0.1, float("inf")], [10 ** 400, 0.9],
+                         ["bad", 0.9], [-0.1, 0.9], [0.2, 1.1], [0.9, 0.1]):
+            with self.subTest(interval=interval):
+                report = {"analysis_available": True, "analysis": {
+                    "hit_probability": 0.8, "hit_probability_interval": interval,
+                }}
+                self.assertEqual(slip_estimate_display(report), ("80.00%", ""))
+
     def test_dollar_figures_are_an_operator_view(self) -> None:
         reader = self.visible_text(self.page("read_only"))
         operator = self.visible_text(self.page("admin"))
