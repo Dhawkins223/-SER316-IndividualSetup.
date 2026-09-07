@@ -169,6 +169,8 @@ class PostgresPool:
         except ImportError as exc:  # pragma: no cover - dependency validation covers this path
             raise RuntimeError("postgres_pool_unavailable") from exc
         self.settings = settings
+        self._open_lock = Lock()
+        self._opened = False
         self._pool = ConnectionPool(
             conninfo=settings.require_url(),
             min_size=settings.pool_min_size,
@@ -192,10 +194,17 @@ class PostgresPool:
         )
 
     def open(self) -> None:
-        self._pool.open(wait=True)
+        # psycopg's initialization wait has a single waiter. Run it once,
+        # before concurrent borrowers can consume the initial connections.
+        with self._open_lock:
+            if not self._opened:
+                self._pool.open(wait=True)
+                self._opened = True
 
     def close(self) -> None:
-        self._pool.close()
+        with self._open_lock:
+            self._pool.close()
+            self._opened = False
 
     @contextmanager
     def connection(self) -> Iterator[DatabaseSession]:

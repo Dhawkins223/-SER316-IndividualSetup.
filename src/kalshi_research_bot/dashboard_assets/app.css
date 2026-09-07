@@ -1585,6 +1585,20 @@ body.login-page {
 #queue .meta { margin-top: var(--s1); color: var(--text-muted); font-size: 12px; }
 .status { min-height: 22px; color: var(--text-secondary); font-size: 13px; }
 
+@media (max-width: 360px) {
+  /* The loading label grows from Refresh to Refreshing. Use the refresh icon
+     at the narrowest width while retaining the full accessible button name. */
+  #refresh-slip { min-width: 44px; min-height: 44px; padding: var(--s2); }
+  #refresh-slip .refresh-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+}
+
 /* Enhanced controls must remain absent with scripting disabled or collapsed. */
 [hidden] { display: none; }
 .slip-enhanced .prediction-drawer[hidden] { display: none; }

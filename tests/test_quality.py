@@ -234,7 +234,7 @@ class QualityTests(unittest.TestCase):
         self.assertIn('id="refresh-slip"', rendered)
         self.assertIn('class="refresh-label"', rendered)
         self.assertIn("Kalshi contracts", rendered)
-        self.assertIn("Live Kalshi prediction builder", rendered)
+        self.assertIn("Live Kalshi market review", rendered)
         self.assertIn("Decision support only", rendered)
         self.assertIn("Fresh data", rendered)
         self.assertIn('aria-live="polite"', rendered)
