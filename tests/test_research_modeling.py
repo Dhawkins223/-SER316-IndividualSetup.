@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 
 from kalshi_research_bot.kalshi_ingestion import persist_kalshi_snapshot
 from kalshi_research_bot.research_modeling import refresh_market_consensus_baseline
@@ -116,6 +118,36 @@ class ResearchModelingTests(PostgresTestCase):
         )
 
         self.assertTrue(result["created"])
+        self.assertEqual(self.query_one("SELECT COUNT(*) AS count FROM research.prediction_runs")["count"], 2)
+        self.assertEqual(self.query_one("SELECT COUNT(*) AS count FROM research.predictions")["count"], 2)
+
+    def test_concurrent_refreshes_share_one_completed_dataset_run(self):
+        self._ingest()
+        # Exercise the common case where the model version already exists,
+        # so its unique insert cannot accidentally serialize the first run.
+        refresh_market_consensus_baseline(
+            run_id="initial", settings=self.settings,
+            as_of_time="2026-07-26T05:00:00+00:00",
+        )
+        changed = deepcopy(_payload())
+        changed["generated_at"] = "2026-07-26T05:05:00+00:00"
+        changed["markets"][0]["api_fetched_at"] = "2026-07-26T05:04:59+00:00"
+        changed["markets"][0]["yes_bid_cents"] = "80"
+        changed["markets"][0]["yes_ask_cents"] = "82"
+        self._ingest(changed, key="baseline:concurrent")
+        start = Barrier(4)
+
+        def refresh(index):
+            start.wait(timeout=10)
+            return refresh_market_consensus_baseline(
+                run_id=f"concurrent-{index}", settings=self.settings,
+                as_of_time="2026-07-26T05:05:00+00:00",
+            )
+
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            results = list(executor.map(refresh, range(4)))
+        self.assertEqual(sum(result["created"] for result in results), 1)
+        self.assertEqual(len({result["prediction_run_id"] for result in results}), 1)
         self.assertEqual(self.query_one("SELECT COUNT(*) AS count FROM research.prediction_runs")["count"], 2)
         self.assertEqual(self.query_one("SELECT COUNT(*) AS count FROM research.predictions")["count"], 2)
 

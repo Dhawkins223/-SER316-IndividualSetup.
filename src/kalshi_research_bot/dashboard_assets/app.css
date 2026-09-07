@@ -583,6 +583,7 @@ button, input, select, textarea { font: inherit; }
   grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
   gap: var(--s3);
 }
+.stat-grid.is-pair { grid-template-columns: repeat(2, minmax(0, 1fr)); max-width: 640px; }
 .stat-card {
   display: grid;
   gap: var(--s2);
@@ -713,7 +714,7 @@ button, input, select, textarea { font: inherit; }
   box-shadow: 0 0 0 3px rgba(0, 230, 118, .16);
 }
 .quote-cell { display: grid; gap: 2px; }
-.quote-cell small { color: var(--text-muted); font-size: 10px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
+.quote-cell small { color: var(--text-muted); font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
 .quote-cell strong { font-size: 14px; font-variant-numeric: tabular-nums; }
 
 details.row-details { grid-column: 1 / -1; margin-top: var(--s2); }
@@ -857,7 +858,7 @@ details.row-details > p { margin-top: var(--s3); color: var(--text-muted); font-
   .metric-strip { grid-auto-rows: min-content; }
   .metric-strip > span { grid-template-rows: subgrid; grid-row: span 3; }
 }
-.metric-strip small { color: var(--text-muted); font-size: 10px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
+.metric-strip small { color: var(--text-muted); font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
 .metric-strip strong { font-size: 16px; font-variant-numeric: tabular-nums; }
 /* The cell label above is a caption -- uppercased, tracked out, bold. An
    interval is a number and has to read as one, so it opts out of all three
@@ -961,7 +962,7 @@ details.leg-details dl {
   gap: var(--s2);
   margin: var(--s3) 0 0;
 }
-details.leg-details dt { color: var(--text-muted); font-size: 10px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
+details.leg-details dt { color: var(--text-muted); font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
 details.leg-details dd { margin: 2px 0 0; font-size: 13px; font-variant-numeric: tabular-nums; }
 
 /* Status / decision blocks */
@@ -990,7 +991,7 @@ details.leg-details dd { margin: 2px 0 0; font-size: 13px; font-variant-numeric:
 .record-card { display: grid; gap: var(--s3); padding: var(--s4); border: 1px solid var(--border); border-radius: var(--r-lg); background: rgba(8, 15, 20, .5); }
 .card-head { display: flex; justify-content: space-between; align-items: center; gap: var(--s2); }
 .record-rate { display: grid; gap: 2px; }
-.record-rate small { color: var(--text-muted); font-size: 10px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
+.record-rate small { color: var(--text-muted); font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
 /* Only a measured rate gets the accent. A pending or absent one is not a
    result, and colouring it like one reads as a good number at a glance. */
 .record-rate strong { font-size: 24px; font-weight: 700; color: var(--text-primary); font-variant-numeric: tabular-nums; }
@@ -1026,7 +1027,7 @@ details.leg-details dd { margin: 2px 0 0; font-size: 13px; font-variant-numeric:
 .sports-selection-fair b { font-variant-numeric: tabular-nums; }
 .sports-selection-book { color: var(--text-muted); font-size: 12px; }
 .sports-selection-fair { display: grid; gap: 1px; }
-.sports-selection-fair small { color: var(--text-muted); font-size: 10px; text-transform: uppercase; letter-spacing: .05em; }
+.sports-selection-fair small { color: var(--text-muted); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
 /* The row declares five columns and can hold seven children, so the shopping
    pills wrap onto an implicit second row whose first track is 1fr. Without
    this they stretch to fill it -- a 500px-wide "Shop +1.1%" bar that reads as
@@ -1063,7 +1064,7 @@ details.leg-details dd { margin: 2px 0 0; font-size: 13px; font-variant-numeric:
    track sits empty and the pair hugs the left edge. */
 .drawer-metrics.is-two-up { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .drawer-metrics span { display: grid; gap: 2px; padding: var(--s3) var(--s2); border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface-alt); text-align: center; }
-.drawer-metrics small { color: var(--text-muted); font-size: 10px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; }
+.drawer-metrics small { color: var(--text-muted); font-size: 11px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; }
 .drawer-metrics strong { font-size: 15px; font-variant-numeric: tabular-nums; }
 
 .drawer-leg-list { display: grid; gap: var(--s2); margin: 0; padding: 0; list-style: none; }
@@ -1166,7 +1167,7 @@ details.leg-details dd { margin: 2px 0 0; font-size: 13px; font-variant-numeric:
 .source-data-grid li small { display: block; overflow: hidden; text-overflow: ellipsis; }
 .source-data-grid li strong { font-size: 13px; white-space: nowrap; }
 .source-data-grid li small { margin-top: 2px; color: var(--text-muted); font-size: 11px; white-space: nowrap; }
-.source-data-grid li > span { flex: none; color: var(--accent); font-size: 10px; font-weight: 700; text-transform: capitalize; }
+.source-data-grid li > span { flex: none; color: var(--accent); font-size: 11px; font-weight: 700; text-transform: capitalize; }
 .source-data-grid .source-data-empty { color: var(--text-muted); font-size: 12px; }
 
 /* ---------------------------------------------------------- mobile nav */
@@ -1174,6 +1175,8 @@ details.leg-details dd { margin: 2px 0 0; font-size: 13px; font-variant-numeric:
 .sidebar-scrim { display: none; }
 
 .mobile-bottom-nav { display: none; }
+.mobile-slip-toggle { display: none; }
+body.slip-open { overflow: hidden; }
 
 /* ---------------------------------------------------------------- responsive */
 
@@ -1217,8 +1220,39 @@ details.leg-details dd { margin: 2px 0 0; font-size: 13px; font-variant-numeric:
 }
 
 @media (max-width: 900px) {
+  :root { --mobile-nav-offset: 0px; }
   .app-frame { grid-template-columns: minmax(0, 1fr); padding: var(--s4); }
   .prediction-drawer { position: static; grid-row: 2; max-height: none; }
+  .slip-enhanced .app-frame { padding-bottom: calc(84px + var(--mobile-nav-offset)); }
+  .slip-enhanced .prediction-drawer {
+    position: fixed;
+    inset: auto var(--s3) var(--mobile-nav-offset);
+    z-index: var(--z-modal);
+    max-height: calc(100dvh - var(--topbar-h) - var(--mobile-nav-offset) - var(--s4));
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    background: var(--surface-raised);
+    border: 1px solid var(--border);
+    box-shadow: var(--shadow-xl);
+  }
+  .mobile-slip-toggle {
+    position: fixed;
+    inset: auto 0 var(--mobile-nav-offset);
+    z-index: var(--z-sticky);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--s2);
+    width: 100%;
+    min-height: 56px;
+    padding: var(--s3);
+    border: 1px solid var(--border);
+    background: var(--surface-raised);
+    color: var(--text-primary);
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .mobile-slip-toggle > span { min-width: 0; }
   .workspace { grid-row: 1; }
   .data-row { grid-template-columns: minmax(0, 1fr) auto; }
   .quote-cell { grid-column: span 1; }
@@ -1226,9 +1260,20 @@ details.leg-details dd { margin: 2px 0 0; font-size: 13px; font-variant-numeric:
 }
 
 @media (max-width: 640px) {
-  :root { --topbar-h: 56px; }
+  :root { --topbar-h: 56px; --mobile-nav-offset: calc(60px + env(safe-area-inset-bottom)); }
   .app-topbar { gap: var(--s2); padding: 0 var(--s3); }
   .brand span { display: none; }
+  /* Long operator diagnostics otherwise consume the entire header at 320px.
+     Keep the live status available to assistive technology; the page also
+     exposes source errors in its visible state panel. */
+  #refresh-status {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
   /* The badge stays. It is the product's compliance posture, not decoration:
      "RESEARCH ONLY" is the clearest signal on the page that this is not a
      betting product, and hiding it below 640px removed it from exactly the
@@ -1238,7 +1283,7 @@ details.leg-details dd { margin: 2px 0 0; font-size: 13px; font-variant-numeric:
   .research-only-badge {
     padding: 4px var(--s2);
     gap: var(--s1);
-    font-size: 10px;
+    font-size: 11px;
     letter-spacing: .04em;
   }
   .app-frame { gap: var(--s3); padding: var(--s3) var(--s3) 84px; }
@@ -1331,7 +1376,7 @@ details.leg-details dd { margin: 2px 0 0; font-size: 13px; font-variant-numeric:
   border-bottom: 1px solid var(--border);
   background: rgba(8, 15, 20, .6);
   color: var(--text-muted);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 700;
   letter-spacing: .06em;
   text-transform: uppercase;
@@ -1539,6 +1584,10 @@ body.login-page {
 #queue article p { margin-top: var(--s2); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text-secondary); font-size: 13px; }
 #queue .meta { margin-top: var(--s1); color: var(--text-muted); font-size: 12px; }
 .status { min-height: 22px; color: var(--text-secondary); font-size: 13px; }
+
+/* Enhanced controls must remain absent with scripting disabled or collapsed. */
+[hidden] { display: none; }
+.slip-enhanced .prediction-drawer[hidden] { display: none; }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {

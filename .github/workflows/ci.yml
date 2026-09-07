@@ -10,6 +10,38 @@ permissions:
   contents: read
 
 jobs:
+  browser:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      PYTHONPATH: src:.
+      APP_ENV: test
+      SMOKE: "1"
+      SMOKE_ARTIFACT_DIR: /tmp/hawknetic-browser
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install browser test dependencies
+        run: python -m pip install -e '.[browser]'
+      - name: Cache Chromium
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: chromium-${{ runner.os }}-playwright-1.62.0
+      - name: Install Chromium and system libraries
+        run: python -m playwright install --with-deps chromium
+      - name: Check all dashboard roles, states, and widths
+        run: python scripts/browser_smoke.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dashboard-browser-checks
+          path: /tmp/hawknetic-browser
+          if-no-files-found: ignore
   validate:
     runs-on: ubuntu-24.04
     services:
