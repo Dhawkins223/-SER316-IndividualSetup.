@@ -165,19 +165,19 @@ async function triggerSlipRefresh() {
 // defect surviving in the fallback.
 function liveDataIsBlocked(freshness) {
   if (freshness && freshness.status) return freshness.status !== "ready";
-  // `== null` catches both null and undefined, and it is checked before the
-  // conversion because `Number(null)` is 0 rather than NaN -- which is how a
-  // null age passed for an age of zero in the first place.
-  // Everything here is one rule: an age is usable only if it is a real,
-  // finite, non-negative number of seconds. Anything else is unknown, and
-  // unknown is blocked.
+  // One rule: an age is usable only if it is a real, finite, non-negative
+  // number of seconds. Anything else is unknown, and unknown is blocked.
   //
-  // Written as `Number.isFinite(Number(raw))` this let six shapes through,
-  // because `Number` turns non-numbers into finite numbers: `Number("")` and
-  // `Number([])` are 0, `Number(true)` is 1, and `Number(null)` is 0 -- the
-  // last being the original defect this whole function exists to remove. So a
-  // string is converted only when it holds something, and the result has to
-  // still be a number afterwards.
+  // Each earlier version delegated part of that judgement to `Number()`, which
+  // answers with a finite number for things that are not numbers, so each one
+  // let a different set through. Written as `Number.isFinite(Number(raw))` the
+  // survivors were `""`, `"   "`, `true`, `[]` and any negative age; `null` was
+  // not among them -- that version rejected it separately, and the version
+  // before *that* is where `Number(null)` being 0 read as an age of zero.
+  //
+  // The shapes are enumerated in `tests/test_live_freshness_client.py`, which
+  // runs this function rather than describing it. Kept there rather than
+  // listed here, because a comment cannot be wrong in a way the suite notices.
   //
   // Negative is rejected rather than clamped: an age below zero means the
   // payload is stamped in the future, which is `blocked_invalid_generated_at`,
