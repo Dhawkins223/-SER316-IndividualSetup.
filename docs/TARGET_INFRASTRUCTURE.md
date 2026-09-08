@@ -15,13 +15,12 @@ alarm on volume capacity before it is spent.
 ```
 GitHub  (source of truth, public repository)
   │
-  ├── GitHub Actions ─ lint · migrations · 1034 tests · browser checks
+  ├── GitHub Actions ─ lint · migrations · 1045 tests · browser checks
   │                    (free for public repositories)
   │
   └── Railway  ── Hobby plan, project `jubilant-liberation`, region iad
         │
-        ├── HawkNeticSportsTools ....... web dashboard, /healthz, /readyz
-        ├── KalshiIngestionProduction .. 5-minutely market collector
+        ├── HawkNeticSportsTools ....... web dashboard + Kalshi collection (300 s)
         ├── SportsResearchProduction ... hourly sports research
         ├── SettlementWorkerProduction . hourly settlement import
         ├── RawRetentionProduction ..... hourly payload-body prune + capacity watch
@@ -35,6 +34,8 @@ Render      not used
 Deliberately removed: two of the three PostgreSQL instances, three staging
 services that have never run successfully, and the staging environment's
 never-applied 122-change patch.
+
+`KalshiIngestionProduction` stays undeployed — see below. It is not a gap.
 
 ## The decision that dominates everything else
 
@@ -144,6 +145,33 @@ month is a bad exchange.
 the case the brief warns about — a small saving that buys substantially more
 operational complexity.
 
+## Do not deploy `KalshiIngestionProduction` as-is
+
+It looks like an obvious omission: the 5-minutely market collector, the most
+important data path in the system, has never deployed — because no source
+repository is connected to it.
+
+Connecting one would be a mistake. The web service already collects Kalshi data
+on exactly that cadence, persisting a snapshot on every dashboard refresh under
+`worker_name="paper-dashboard-refresh"`. The 1.12 GB of `kalshi_public_api`
+bodies measured in production came from there.
+
+The two paths would not deduplicate. Uniqueness is
+`(batch_id, source_identifier, content_hash)` and every cycle opens a new batch,
+so running both would store two copies of every five-minute payload and roughly
+**double the ~166 MB/day** growth that filled the volume.
+
+If the dedicated worker is wanted — and there is a good argument for it, since
+it carries a cadence idempotency key and proper batch lineage while the
+dashboard path carries neither — then the dashboard's collection has to be
+turned off in the same change, by setting `DASHBOARD_REFRESH_SECONDS=0` on the
+web service. That variable exists for exactly this case: "a dashboard that reads
+only what the collector workers write."
+
+**Decision: leave it undeployed until someone makes that swap deliberately.**
+Consolidating collection onto the worker is the better long-term shape; doing
+half of it is worse than doing none.
+
 ## Retention: the window has to be able to bite
 
 The window sets the table's steady state: `daily_growth x window_days`. Against
@@ -194,7 +222,7 @@ container runtime. It now supports three modes via `HAWKNETIC_LOCAL_DB`:
 | `external` | Use a PostgreSQL that is already running |
 
 Compose and the Codespaces flow are untouched and remain canonical. The full
-suite — **1034 tests, 124 seconds** — was verified during this audit against a
+suite — **1045 tests, 145 seconds** — was verified during this audit against a
 system PostgreSQL 16 with no Docker running.
 
 ## What has to happen next, and who can do it

@@ -148,7 +148,7 @@ compared against anything.
 | # | Component | Class | Where it runs | Cadence |
 | --- | --- | --- | --- | --- |
 | 1 | Dashboard / `/healthz` / `/readyz` | HTTP API + server-rendered UI | Railway `HawkNeticSportsTools` | always on |
-| 2 | `kalshi-market-ingestion` | Scraper / ingestion | Railway (never deployed) | 300 s |
+| 2 | Kalshi market collection | Scraper / ingestion | **the web service's refresh**, not the worker named for it | 300 s |
 | 3 | `external-source-ingestion` | Scraper / ingestion | not deployed | 900 s |
 | 4 | `crypto-research` | Batch compute | not deployed | 900 s |
 | 5 | `sports-research` | Scraper + batch compute | Railway `SportsResearchProduction` | 3600 s |
@@ -168,6 +168,36 @@ service in the other project belongs to the other product.
 
 Six of the nine worker roles are defined in `SERVICE_SPECS` but have no Railway
 service. They are code paths, not running infrastructure.
+
+### Kalshi collection actually happens in the web service
+
+`KalshiIngestionProduction` has never deployed because it has **no source
+repository connected** — its config carries variables, private networking and a
+region, and no `source` at all. It has never collected anything.
+
+Collection happens anyway, in the web service. `paper_server.py` persists a
+snapshot on every dashboard refresh:
+
+```python
+source_persistence = persist_kalshi_snapshot(
+    payload,
+    worker_name="paper-dashboard-refresh",
+)
+```
+
+The hosted refresh runs every 300 seconds, which is the same cadence
+`kalshi-market-ingestion` is specified at. So the 1.12 GB of `kalshi_public_api`
+payload bodies measured in production came from the dashboard, not from the
+worker named after the job.
+
+This matters before anyone "fixes" the missing service. The worker persists
+under `worker_name="kalshi-market-ingestion"` with a cadence idempotency key;
+the dashboard persists under `paper-dashboard-refresh` with none. Uniqueness on
+`raw.source_payloads` is `(batch_id, source_identifier, content_hash)` and every
+cycle opens a new batch, so the two would **not** deduplicate against each
+other. Connecting a source to `KalshiIngestionProduction` while the dashboard
+keeps refreshing would roughly double the payload growth rate that filled the
+volume in the first place.
 
 ## Configuration drift between repository and deployment
 
@@ -233,5 +263,5 @@ this audit, `local.sh` exited 127 without Docker, so every command — including
 running tests — required a container runtime.
 
 The full suite was verified during this audit against a system PostgreSQL with
-no Docker at all: **1034 tests, 124 seconds**. Docker is a convenience for this
+no Docker at all: **1045 tests, 145 seconds**. Docker is a convenience for this
 project, not a requirement.

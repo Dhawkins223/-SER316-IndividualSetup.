@@ -88,30 +88,32 @@ not, and there are three of them where there should be one.
 
 ## Where it lands
 
-After recovering the production database, deleting the two obsolete staging
-databases and their three dead services, and deploying the Kalshi collector that
-was never deployed:
+After recovering the production database and deleting the two obsolete staging
+databases and their three dead services:
 
 | Service | Monthly |
 | --- | ---: |
 | `Postgres-gxQB` (RAM 0.908 GB + ~2.5 GB volume after prune and vacuum) | $9.46 |
-| `HawkNeticSportsTools` | $2.18 |
-| `KalshiIngestionProduction` (deployed, sized like its peers) | $0.40 |
+| `HawkNeticSportsTools` (web dashboard **and** Kalshi collection) | $2.18 |
 | `SettlementWorkerProduction` | $0.41 |
 | `SportsResearchProduction` | $0.40 |
 | `RawRetentionProduction` | $0.37 |
 | `hawknetic-office` project (unchanged, not this repository's) | $0.49 |
-| **Usage** | **$13.71** |
-| **Bill** (Hobby) | **$13.71** |
+| **Usage** | **$13.31** |
+| **Bill** (Hobby) | **$13.31** |
+
+`KalshiIngestionProduction` is not in this table and should not be deployed
+as-is: the web service already collects on the same 300-second cadence, and the
+two paths do not deduplicate. See `docs/TARGET_INFRASTRUCTURE.md`.
 
 ## Savings
 
 | | |
 | --- | ---: |
 | Current baseline monthly cost | **$39.81** |
-| Target monthly cost | **$13.71** |
-| **Monthly saving** | **$26.10** |
-| **Annualised saving** | **$313.20** |
+| Target monthly cost | **$13.31** |
+| **Monthly saving** | **$26.50** |
+| **Annualised saving** | **$318.00** |
 
 Roughly 66% of the bill, and essentially all of it comes from deleting a staging
 database nothing has used since July.
@@ -129,7 +131,7 @@ Recovering the database needs volume headroom, and Hobby caps volumes at 5 GB.
 | Included usage | $5 | $20 |
 | Default volume size | 5 GB | 50 GB |
 | Self-serve volume ceiling | 5 GB | 1 TB |
-| Bill at the target $13.71 of usage | **$13.71** | **$20.00** |
+| Bill at the target $13.31 of usage | **$13.31** | **$20.00** |
 
 Pro costs **$6.29/month more** at this usage level and buys the ability to grow
 a volume — which, on a database that has now hit its ceiling twice, is worth
