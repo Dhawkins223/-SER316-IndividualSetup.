@@ -35,14 +35,66 @@ jobs:
           python -m pip install pip-audit==2.9.0
 
       - name: Audit installed dependencies
-        # --skip-editable, and deliberately not --strict. The project installs
-        # itself editable, and no index can resolve an unpublished local
-        # package: --strict treats that unauditable distribution as a failure,
-        # so the job would go red on every run without a vulnerability in
-        # sight. Verified: --strict exits 1 here, --skip-editable alone exits 0
-        # and names the skip in its report. A real advisory against psycopg
-        # still fails the job either way.
-        run: python -m pip_audit --skip-editable
+        # Neither bare `--strict` nor bare `--skip-editable` is right here.
+        #
+        # `--strict` fails when any distribution could not be audited, and the
+        # project installs itself editable -- no index can resolve an
+        # unpublished local package -- so the job would go red on every run
+        # with no vulnerability in sight.
+        #
+        # Dropping `--strict` fixes that but silences too much: a dependency
+        # skipped for any other reason, such as a transient index or network
+        # error, is logged and the run still exits 0. A security scan that
+        # reports green on an incomplete audit is worse than one that is
+        # merely noisy.
+        #
+        # So audit to JSON and judge the report: every skip except the known
+        # editable one is a failure, and so is any advisory.
+        run: |
+          set -uo pipefail
+          python -m pip_audit --skip-editable --format json --output /tmp/pip-audit.json
+          audit_status=$?
+          if [ ! -s /tmp/pip-audit.json ]; then
+            echo "pip-audit produced no report (exit $audit_status); treating as a failed audit." >&2
+            exit 1
+          fi
+          python - <<'PY'
+          import json
+          import sys
+
+          with open("/tmp/pip-audit.json", encoding="utf-8") as handle:
+              report = json.load(handle)
+
+          dependencies = report.get("dependencies") or []
+          if not dependencies:
+              sys.exit("pip-audit audited no dependencies at all.")
+
+          # The one distribution that legitimately cannot be resolved: this
+          # project, installed editable from the working tree.
+          expected_skip = "distribution marked as editable"
+
+          unexpected = [
+              (dep.get("name", "?"), dep["skip_reason"])
+              for dep in dependencies
+              if dep.get("skip_reason") and dep["skip_reason"].strip().lower() != expected_skip
+          ]
+          vulnerable = [
+              (dep.get("name", "?"), dep.get("version", "?"), vuln.get("id", "?"))
+              for dep in dependencies
+              for vuln in (dep.get("vulns") or [])
+          ]
+
+          for name, reason in unexpected:
+              print(f"::error::{name} could not be audited: {reason}")
+          for name, version, identifier in vulnerable:
+              print(f"::error::{name} {version} is affected by {identifier}")
+
+          audited = len(dependencies) - sum(1 for dep in dependencies if dep.get("skip_reason"))
+          print(f"Audited {audited} of {len(dependencies)} distributions.")
+
+          if unexpected or vulnerable:
+              sys.exit(1)
+          PY
 
   secrets:
     runs-on: ubuntu-24.04
