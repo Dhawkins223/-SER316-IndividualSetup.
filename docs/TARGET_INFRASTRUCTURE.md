@@ -230,8 +230,11 @@ system PostgreSQL 16 with no Docker running.
 Three things need the account owner, because the Railway API available to this
 audit cannot do them and because two of them destroy data.
 
-1. **Recover the production database.** It cannot restart on a full volume, and
-   Hobby caps volumes at 5 GB. See `docs/ROLLBACK.md` for the ordered runbook.
+1. **Recover the production database.** It cannot restart on a full volume.
+   Check the service's Backups tab first — restoring a pre-2026-09-01 snapshot
+   mounts a fresh volume and costs nothing. Failing that, the volume has to grow,
+   which Railway's published limits put on the Pro plan. `docs/ROLLBACK.md` has
+   the ordered runbook and the reason each step comes where it does.
 2. **Delete the two obsolete staging databases** — after taking a backup. They
    hold ~10 GB between them and serve services that have not deployed
    successfully since July and August.

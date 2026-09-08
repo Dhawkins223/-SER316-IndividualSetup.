@@ -29,12 +29,32 @@ On a volume with no free space PostgreSQL cannot finish recovery, so it exits
 during startup — every time. Restarting or redeploying the service reproduces
 the failure exactly. **The volume has to grow before anything else can work.**
 
-### Prerequisites
+### Check this first — it may cost nothing
 
-Railway's Hobby plan provisions 5 GB volumes and 5 GB is the plan ceiling, so
-step 1 requires the **Pro** plan ($20/month, includes $20 of usage). This is the
-one step with no alternative: the data cannot be read, backed up, dumped or
-pruned while the database cannot start.
+Before upgrading anything, open **`Postgres-gxQB` → Backups** in the Railway
+dashboard.
+
+If a backup exists from before 2026-09-01, restoring it is the cheap way out.
+Railway mounts the restored snapshot as a **new** volume and leaves the current
+one in the project, unmounted — so the database comes up on data that predates
+the fill, with room to breathe, and the full volume is still there if the
+restore turns out to be wrong. You lose whatever was collected between the
+backup and the fill; you skip the plan upgrade entirely.
+
+If the Backups tab is empty, backups were never scheduled, and the resize path
+below is the only one. Either way, turn on a **Daily** schedule once the
+database is healthy again.
+
+### Prerequisites for the resize path
+
+Railway lists 5 GB as the Hobby plan's volume size and only Pro as self-serve up
+to 1 TB, so growing this volume is expected to require the **Pro** plan
+($20/month, including $20 of usage). Confirm it against the Live Resize dialog
+rather than taking it on faith — if the dialog offers a size above 5 GB on
+Hobby, take it and stay on Hobby.
+
+There is no way around needing *some* headroom: the data cannot be read, backed
+up, dumped or pruned while the database cannot start.
 
 ### The order that works
 
