@@ -55,7 +55,8 @@ limits and PostgreSQL storage.
 | `SETTLEMENT_MAX_MARKETS_PER_RUN`, `SETTLEMENT_HTTP_TIMEOUT_SECONDS`, `SETTLEMENT_MAX_CONSECUTIVE_FETCH_ERRORS` | Settlement worker batch and failure limits. |
 | `KALSHI_RUNTIME_CLEANUP_ENABLED` | Enables bounded local runtime-cache cleanup. |
 | `SPORTS_SOURCE_MODE`, `SPORTS_SCRAPER_ENABLED`, `SPORTS_RETRIEVAL_PLAN`, `SPORTS_SOURCE_TIMEOUT_SECONDS`, `SPORTS_MAX_SUMMARY_REQUESTS`, `SPORTS_FINALS_LOOKBACK_DAYS` | Sports source selection, request bounds, and finals lookback. |
-| `RAW_RETENTION_DAYS`, `RAW_RETENTION_BATCH_LIMIT`, `RAW_RETENTION_DRY_RUN`, `RAW_RETENTION_DUPLICATION_CENSUS` | Raw-payload retention and measurement. Production changes require the readiness gate; the template defaults to dry-run. |
+| `RAW_RETENTION_DAYS`, `RAW_RETENTION_BATCH_LIMIT`, `RAW_RETENTION_DRY_RUN`, `RAW_RETENTION_DUPLICATION_CENSUS` | Raw-payload retention and measurement. Production changes require the readiness gate; the template defaults to dry-run. The window sets the table's steady-state size, so compute it from the volume size and measured growth — see `docs/raw-payload-retention.md`. |
+| `DATABASE_VOLUME_CAPACITY_BYTES` | Volume ceiling the database runs against. Drives the `database_capacity` anomaly: warning at 75%, critical at 90%. Defaults to 5 GB, Railway's Hobby volume size. |
 | `EXTERNAL_SOURCES_CONFIG` | Repository-relative configuration for the optional external-source worker. |
 
 ## Dashboard, authentication, integrations, and runtime roles

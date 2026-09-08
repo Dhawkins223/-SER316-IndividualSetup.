@@ -1,0 +1,35 @@
+version: 2
+
+# The runtime dependency surface is deliberately two packages wide (psycopg and
+# psycopg_pool), and the dev extras are pinned exactly so a linter release
+# cannot turn an unrelated pull request red. Pinning that tightly only stays
+# safe if something proposes the upgrades, which is what this does.
+updates:
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 3
+    labels:
+      - dependencies
+    commit-message:
+      prefix: "deps"
+    groups:
+      # psycopg and psycopg_pool are released together and are version-coupled;
+      # separate pull requests for them would each be half an upgrade.
+      psycopg:
+        patterns:
+          - "psycopg*"
+
+  # Actions are the other supply chain here: this workflow runs with repository
+  # contents and a PostgreSQL service, and its third-party steps are pinned by
+  # major tag only.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 3
+    labels:
+      - dependencies
+    commit-message:
+      prefix: "ci"

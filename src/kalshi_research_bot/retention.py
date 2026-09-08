@@ -18,6 +18,7 @@ the body, so pruning does not disturb either. The body itself is not recoverable
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -27,9 +28,26 @@ from .database import DatabaseSettings, connection_pool
 
 TOMBSTONE_KEY = "__retention__"
 TOMBSTONE_STATE = "body_pruned"
-DEFAULT_RETENTION_DAYS = 30
+# Ten days, not thirty. The window sets the table's steady-state size
+# (`daily_growth x window_days`), and production measured ~166 MB/day of raw
+# payloads against a 5 GB volume: thirty days wants ~5 GB of payloads alone,
+# which the volume cannot hold. A window wider than the data's own age is also
+# indistinguishable from having no retention at all, because nothing ever
+# becomes eligible -- that is exactly how production reached 100% of its volume
+# and PANICked on 2026-09-01. Ten days is the setting production proved:
+# ~1.7 GB of payloads, and the first pass drained the eligible backlog to zero.
+# See docs/raw-payload-retention.md for the arithmetic.
+DEFAULT_RETENTION_DAYS = 10
 MINIMUM_RETENTION_DAYS = 7
 DEFAULT_BATCH_LIMIT = 5000
+
+# Railway's Hobby plan provisions 5 GB volumes and that is the plan's ceiling,
+# so it is the capacity this project actually runs against. Override it with
+# DATABASE_VOLUME_CAPACITY_BYTES when the volume is resized or the database
+# moves somewhere with a different ceiling.
+DEFAULT_VOLUME_CAPACITY_BYTES = 5_000_000_000
+CAPACITY_WARNING_RATIO = 0.75
+CAPACITY_CRITICAL_RATIO = 0.90
 
 
 class RetentionWindowTooShort(ValueError):
@@ -346,6 +364,53 @@ def source_payload_duplication_report(
             format(redundant_bytes / body_bytes, ".4f") if body_bytes else None
         ),
         "by_source": by_source,
+    }
+
+
+def volume_capacity_bytes() -> int:
+    """The volume ceiling this database is running against, in bytes."""
+
+    raw = os.environ.get("DATABASE_VOLUME_CAPACITY_BYTES")
+    if raw is None or not str(raw).strip():
+        return DEFAULT_VOLUME_CAPACITY_BYTES
+    try:
+        parsed = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return DEFAULT_VOLUME_CAPACITY_BYTES
+    return parsed if parsed > 0 else DEFAULT_VOLUME_CAPACITY_BYTES
+
+
+def database_capacity_state(
+    database_bytes: int,
+    *,
+    capacity_bytes: int | None = None,
+) -> dict[str, Any]:
+    """How close the database is to filling its volume, and whether to shout.
+
+    Retention already reported `database_bytes` every cycle, and the number rose
+    steadily to the volume ceiling without anything ever escalating it. On
+    2026-09-01 PostgreSQL ran out of space mid-write, PANICked, and then could
+    not finish WAL recovery to restart -- a full volume is unrecoverable in
+    place, so the only useful alarm is one that fires while there is still room
+    to act. Warning at 75% and critical at 90% leaves roughly four and two days
+    of headroom respectively at the growth rate production measured.
+    """
+
+    capacity = capacity_bytes if capacity_bytes and capacity_bytes > 0 else volume_capacity_bytes()
+    used = max(0, int(database_bytes))
+    ratio = used / capacity if capacity else 0.0
+    if ratio >= CAPACITY_CRITICAL_RATIO:
+        state = "critical"
+    elif ratio >= CAPACITY_WARNING_RATIO:
+        state = "warning"
+    else:
+        state = "ok"
+    return {
+        "database_bytes": used,
+        "capacity_bytes": capacity,
+        "headroom_bytes": max(0, capacity - used),
+        "used_ratio": round(ratio, 4),
+        "state": state,
     }
 
 

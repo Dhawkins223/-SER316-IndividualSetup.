@@ -26,6 +26,13 @@ smoke              Apply migrations and run the application readiness smoke chec
 verify             Run non-destructive configuration, migration, test, and smoke checks.
 research-status    Show worker, connector, and queued operator-message status.
 research-once      Run one research-only cycle for each core worker.
+
+PostgreSQL source (HAWKNETIC_LOCAL_DB):
+  auto      Use Compose when Docker is present, otherwise an external server (default).
+  compose   Require Docker and run PostgreSQL from compose.yml.
+  external  Use a PostgreSQL that is already running. Point it with POSTGRES_HOST,
+            POSTGRES_PORT, POSTGRES_USER, POSTGRES_PASSWORD (or .env). The script
+            creates its two databases but never starts or stops the server.
 EOF
   exit 0
 fi
@@ -35,10 +42,33 @@ case "$command_name" in
   *) echo "Unknown local workflow command: $command_name" >&2; exit 2 ;;
 esac
 
-if ! command -v docker >/dev/null 2>&1; then
-  echo "Docker is required for the isolated local PostgreSQL service; run this workflow in the repository Codespace." >&2
-  exit 127
-fi
+# Docker is one way to get a local PostgreSQL, not the only one. A Codespace
+# runs Docker-in-Docker and Compose is the documented default there, but the
+# same workflow has to run against a PostgreSQL that already exists -- a
+# Codespaces service container, a system package, or a managed development
+# database -- so that developing this project never requires a container
+# runtime on someone's laptop.
+#
+#   HAWKNETIC_LOCAL_DB=auto      use Compose when Docker is present (default)
+#   HAWKNETIC_LOCAL_DB=compose   require Compose, fail if Docker is missing
+#   HAWKNETIC_LOCAL_DB=external  use an already-running PostgreSQL
+db_mode="${HAWKNETIC_LOCAL_DB:-auto}"
+case "$db_mode" in
+  auto)
+    if command -v docker >/dev/null 2>&1; then db_mode="compose"; else db_mode="external"; fi
+    ;;
+  compose)
+    if ! command -v docker >/dev/null 2>&1; then
+      echo "HAWKNETIC_LOCAL_DB=compose needs Docker. Install Docker, run this in the repository Codespace, or set HAWKNETIC_LOCAL_DB=external to use a PostgreSQL that is already running." >&2
+      exit 127
+    fi
+    ;;
+  external) ;;
+  *)
+    echo "Unknown HAWKNETIC_LOCAL_DB mode: $db_mode (expected auto, compose, or external)" >&2
+    exit 2
+    ;;
+esac
 
 local_env_value() {
   local key="$1"
@@ -63,7 +93,12 @@ app_database="${POSTGRES_DB:-$(local_env_value POSTGRES_DB hawknetic)}"
 test_database="${POSTGRES_TEST_DB:-$(local_env_value POSTGRES_TEST_DB hawknetic_test)}"
 dashboard_host="${DASHBOARD_HOST:-$(local_env_value DASHBOARD_HOST 127.0.0.1)}"
 dashboard_port="${PORT:-$(local_env_value PORT 8765)}"
-if [[ -z "$postgres_password" ]]; then
+postgres_host="${POSTGRES_HOST:-$(local_env_value POSTGRES_HOST 127.0.0.1)}"
+# Compose always provisions a password-authenticated server, so an empty
+# password there is a misconfiguration worth catching early. An external server
+# may legitimately use trust or peer authentication, and demanding a password it
+# does not want is how a workflow ends up requiring Docker again.
+if [[ -z "$postgres_password" && "$db_mode" == "compose" ]]; then
   echo "POSTGRES_PASSWORD must be set in the untracked .env file." >&2
   exit 2
 fi
@@ -77,8 +112,13 @@ fi
 
 database_url() {
   local database_name="$1"
-  printf 'postgresql://%s:%s@127.0.0.1:%s/%s' \
-    "$postgres_user" "$postgres_password" "$postgres_port" "$database_name"
+  if [[ -z "$postgres_password" ]]; then
+    printf 'postgresql://%s@%s:%s/%s' \
+      "$postgres_user" "$postgres_host" "$postgres_port" "$database_name"
+  else
+    printf 'postgresql://%s:%s@%s:%s/%s' \
+      "$postgres_user" "$postgres_password" "$postgres_host" "$postgres_port" "$database_name"
+  fi
 }
 
 run_app() {
@@ -92,25 +132,62 @@ run_app() {
   "$@"
 }
 
+# Ask over the wire rather than through the container, so the same check works
+# for a Compose server and an external one. psycopg is already a dependency of
+# the package, which keeps this from requiring psql on the host.
+ensure_databases_ready() {
+  local attempts="$1"
+  DATABASE_BOOTSTRAP_URL="$(database_url postgres)" \
+  DATABASE_BOOTSTRAP_NAMES="$app_database,$test_database" \
+  DATABASE_BOOTSTRAP_ATTEMPTS="$attempts" \
+  "$python_bin" - <<'PY'
+import os
+import sys
+import time
+
+import psycopg
+
+url = os.environ["DATABASE_BOOTSTRAP_URL"]
+names = [name for name in os.environ["DATABASE_BOOTSTRAP_NAMES"].split(",") if name]
+attempts = max(1, int(os.environ["DATABASE_BOOTSTRAP_ATTEMPTS"]))
+
+last_error = None
+for _ in range(attempts):
+    try:
+        with psycopg.connect(url, connect_timeout=5, autocommit=True) as connection:
+            for name in names:
+                exists = connection.execute(
+                    "SELECT 1 FROM pg_database WHERE datname = %s", (name,)
+                ).fetchone()
+                if not exists:
+                    connection.execute(f'CREATE DATABASE "{name}"')
+        sys.exit(0)
+    except Exception as exc:  # noqa: BLE001 - report whatever kept us out
+        last_error = exc
+        time.sleep(2)
+
+print(f"Local PostgreSQL did not become reachable: {last_error}", file=sys.stderr)
+sys.exit(1)
+PY
+}
+
 wait_for_database() {
-  local attempts=30
-  until "${compose[@]}" exec -T postgres pg_isready -U "$postgres_user" -d "$app_database" >/dev/null; do
-    attempts=$((attempts - 1))
-    if [[ "$attempts" -le 0 ]]; then
-      echo "Local PostgreSQL did not become healthy." >&2
+  if [[ "$db_mode" == "compose" ]]; then
+    ensure_databases_ready 30
+  else
+    # An external server is not ours to start, so a short wait is a health
+    # check rather than a boot delay, and its failure should say so.
+    if ! ensure_databases_ready 3; then
+      echo "Set POSTGRES_HOST/POSTGRES_PORT/POSTGRES_USER/POSTGRES_PASSWORD (or .env) to a PostgreSQL that is already running, or use HAWKNETIC_LOCAL_DB=compose to have Docker provide one." >&2
       return 1
     fi
-    sleep 2
-  done
-  if ! "${compose[@]}" exec -T postgres psql -U "$postgres_user" -d postgres -tAc \
-      "SELECT 1 FROM pg_database WHERE datname = '$test_database'" | grep -q 1; then
-    "${compose[@]}" exec -T postgres psql -U "$postgres_user" -d postgres -c \
-      "CREATE DATABASE \"$test_database\"" >/dev/null
   fi
 }
 
 db_start() {
-  "${compose[@]}" up -d postgres
+  if [[ "$db_mode" == "compose" ]]; then
+    "${compose[@]}" up -d postgres
+  fi
   wait_for_database
 }
 
@@ -171,21 +248,54 @@ case "$command_name" in
       --host "$dashboard_host" --port "$dashboard_port"
     ;;
   stop|db-stop)
-    "${compose[@]}" stop postgres
+    if [[ "$db_mode" == "compose" ]]; then
+      "${compose[@]}" stop postgres
+    else
+      echo "PostgreSQL is externally managed (HAWKNETIC_LOCAL_DB=$db_mode); this workflow did not start it and will not stop it."
+    fi
     ;;
   logs)
-    "${compose[@]}" logs -f postgres
+    if [[ "$db_mode" == "compose" ]]; then
+      "${compose[@]}" logs -f postgres
+    else
+      echo "PostgreSQL is externally managed (HAWKNETIC_LOCAL_DB=$db_mode); read its logs where it runs." >&2
+      exit 2
+    fi
     ;;
   db-start)
     db_start
     ;;
   db-status)
-    "${compose[@]}" ps
+    if [[ "$db_mode" == "compose" ]]; then
+      "${compose[@]}" ps
+    else
+      db_start
+      run_app "$app_database" "$python_bin" -m kalshi_research_bot.db_command status
+    fi
     ;;
   db-reset)
-    read -r -p "Delete only the local PostgreSQL volume? Type RESET to continue: " confirmation
+    # Dropping two databases is the external equivalent of deleting the Compose
+    # volume: it discards exactly this project's local data and nothing else on
+    # a server that may be hosting more than this project.
+    read -r -p "Delete only the local PostgreSQL data? Type RESET to continue: " confirmation
     [[ "$confirmation" == "RESET" ]] || { echo "Local database reset cancelled."; exit 1; }
-    "${compose[@]}" down -v
+    if [[ "$db_mode" == "compose" ]]; then
+      "${compose[@]}" down -v
+    else
+      DATABASE_RESET_URL="$(database_url postgres)" \
+      DATABASE_RESET_NAMES="$app_database,$test_database" \
+      "$python_bin" - <<'PY'
+import os
+
+import psycopg
+
+url = os.environ["DATABASE_RESET_URL"]
+names = [name for name in os.environ["DATABASE_RESET_NAMES"].split(",") if name]
+with psycopg.connect(url, connect_timeout=5, autocommit=True) as connection:
+    for name in names:
+        connection.execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
+PY
+    fi
     db_start
     ;;
   migrate)
@@ -207,7 +317,9 @@ case "$command_name" in
     run_app "$app_database" "$python_bin" -m kalshi_research_bot.db_command status
     ;;
   verify)
-    "${compose[@]}" config >/dev/null
+    if [[ "$db_mode" == "compose" ]]; then
+      "${compose[@]}" config >/dev/null
+    fi
     migrate
     test_database_migrate
     run_app "$test_database" "$python_bin" -m unittest discover -s "$repo_root/tests"

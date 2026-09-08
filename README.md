@@ -39,12 +39,47 @@ Useful commands:
 ./scripts/local.sh stop
 ```
 
-`db-reset` destroys only the Codespace Compose volume and requires the explicit
+`db-reset` destroys only this project's local database and requires the explicit
 `RESET` confirmation. It never contacts Railway.
 
 See [Cloud development](docs/cloud-development.md) for setup, Secrets, ports,
 tests, database commands, the Railway configuration audit, staging proposal,
 logs, rollback, and the complete Windows/Docker Desktop retirement boundary.
+
+### Running without Docker
+
+Compose is the default and the Codespaces path is unchanged, but Docker is not
+required. `HAWKNETIC_LOCAL_DB` selects where PostgreSQL comes from:
+
+| Mode | Behaviour |
+| --- | --- |
+| `auto` (default) | Compose when Docker is present, an external server otherwise |
+| `compose` | Require Docker and run PostgreSQL from `compose.yml` |
+| `external` | Use a PostgreSQL that is already running |
+
+In `external` mode the workflow creates its two databases but never starts or
+stops the server. Point it with `POSTGRES_HOST`, `POSTGRES_PORT`,
+`POSTGRES_USER` and `POSTGRES_PASSWORD` (or `.env`):
+
+```bash
+HAWKNETIC_LOCAL_DB=external POSTGRES_PORT=54329 ./scripts/local.sh test
+```
+
+That covers a Codespaces service container, a system PostgreSQL, or a managed
+development database. The full suite runs against any of them.
+
+## Infrastructure
+
+| Document | What it covers |
+| --- | --- |
+| [Current infrastructure](docs/CURRENT_INFRASTRUCTURE.md) | What is deployed, measured rather than configured |
+| [Target infrastructure](docs/TARGET_INFRASTRUCTURE.md) | Provider decisions and the evidence for each |
+| [Deployment](docs/DEPLOYMENT.md) | Commit to production, health endpoints, migrations |
+| [Infrastructure costs](docs/INFRASTRUCTURE_COSTS.md) | Measured per-service cost and where it goes |
+| [Recovery and rollback](docs/ROLLBACK.md) | Full-volume recovery, deploy rollback |
+
+Everything runs on Railway and GitHub. Cloudflare, Neon and Render were
+evaluated and are deliberately unused — see the target document for why.
 
 ## Database contract
 

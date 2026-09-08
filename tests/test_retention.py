@@ -1,15 +1,23 @@
 from __future__ import annotations
 
+import unittest
 from datetime import datetime, timedelta, timezone
+from unittest import mock
 
 from kalshi_research_bot.collection_ledger import CollectionLedger
 from kalshi_research_bot.kalshi_ingestion import load_latest_kalshi_snapshot
+from kalshi_research_bot.monitoring import actionable_monitoring_events
 from kalshi_research_bot.retention import (
+    DEFAULT_RETENTION_DAYS,
+    DEFAULT_VOLUME_CAPACITY_BYTES,
+    MINIMUM_RETENTION_DAYS,
     TOMBSTONE_KEY,
     RetentionWindowTooShort,
+    database_capacity_state,
     prune_source_payload_bodies,
     render_storage_report,
     source_payload_storage_report,
+    volume_capacity_bytes,
 )
 
 from tests.postgres_support import PostgresTestCase
@@ -17,6 +25,85 @@ from tests.postgres_support import PostgresTestCase
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+class DatabaseCapacityTests(unittest.TestCase):
+    """The alarm that was missing when the volume filled.
+
+    Production reported `database_bytes` every retention cycle while the number
+    climbed to the volume ceiling, and nothing ever escalated it. PostgreSQL
+    then ran out of space mid-write, PANICked, and could not finish WAL recovery
+    to restart. These tests pin the thresholds that fire while there is still
+    room to prune.
+    """
+
+    def test_an_empty_database_is_not_an_alarm(self) -> None:
+        state = database_capacity_state(0)
+        self.assertEqual(state["state"], "ok")
+        self.assertEqual(state["used_ratio"], 0.0)
+        self.assertEqual(state["headroom_bytes"], DEFAULT_VOLUME_CAPACITY_BYTES)
+
+    def test_three_quarters_full_warns_while_there_is_still_room(self) -> None:
+        state = database_capacity_state(int(DEFAULT_VOLUME_CAPACITY_BYTES * 0.76))
+        self.assertEqual(state["state"], "warning")
+        self.assertGreater(state["headroom_bytes"], 0)
+
+    def test_ninety_percent_is_critical(self) -> None:
+        state = database_capacity_state(int(DEFAULT_VOLUME_CAPACITY_BYTES * 0.91))
+        self.assertEqual(state["state"], "critical")
+
+    def test_the_volume_that_actually_died_reports_critical(self) -> None:
+        # 4.99 GB of a 5 GB Railway Hobby volume: the measured state of
+        # production on 2026-09-08, after the PANIC.
+        state = database_capacity_state(4_994_793_472)
+        self.assertEqual(state["state"], "critical")
+        self.assertGreater(state["used_ratio"], 0.99)
+
+    def test_capacity_is_configurable_for_a_resized_volume(self) -> None:
+        with mock.patch.dict("os.environ", {"DATABASE_VOLUME_CAPACITY_BYTES": "50000000000"}):
+            self.assertEqual(volume_capacity_bytes(), 50_000_000_000)
+            # The same byte count that is critical on 5 GB is unremarkable on 50.
+            self.assertEqual(database_capacity_state(4_994_793_472)["state"], "ok")
+
+    def test_a_nonsense_capacity_falls_back_rather_than_disabling_the_alarm(self) -> None:
+        for value in ("", "   ", "not-a-number", "0", "-1"):
+            with mock.patch.dict("os.environ", {"DATABASE_VOLUME_CAPACITY_BYTES": value}):
+                self.assertEqual(volume_capacity_bytes(), DEFAULT_VOLUME_CAPACITY_BYTES)
+
+    def test_a_critical_volume_escalates_past_the_default_severity(self) -> None:
+        events = actionable_monitoring_events(
+            {
+                "status": "ready",
+                "anomalies": [{"type": "database_capacity", "state": "critical", "used_ratio": 0.99}],
+            }
+        )
+        self.assertEqual([event["severity"] for event in events], ["critical"])
+        self.assertIn("RAW_RETENTION_DAYS", events[0]["next_action"])
+
+    def test_a_warning_volume_stays_a_warning(self) -> None:
+        events = actionable_monitoring_events(
+            {
+                "status": "ready",
+                "anomalies": [{"type": "database_capacity", "state": "warning", "used_ratio": 0.78}],
+            }
+        )
+        self.assertEqual([event["severity"] for event in events], ["warning"])
+
+
+class RetentionWindowDefaultTests(unittest.TestCase):
+    def test_the_default_window_fits_the_volume_it_runs_against(self) -> None:
+        """A window is only real if the data can age into it.
+
+        At the ~166 MB/day of raw payloads production measured, the default
+        window has to leave room for the core tables on the same volume. Thirty
+        days wanted ~5 GB of payloads alone on a 5 GB volume, so nothing ever
+        became eligible and retention pruned nothing.
+        """
+
+        measured_daily_payload_bytes = 166_000_000
+        steady_state = measured_daily_payload_bytes * DEFAULT_RETENTION_DAYS
+        self.assertLess(steady_state, DEFAULT_VOLUME_CAPACITY_BYTES * 0.5)
+        self.assertGreaterEqual(DEFAULT_RETENTION_DAYS, MINIMUM_RETENTION_DAYS)
 
 
 class RetentionTests(PostgresTestCase):
