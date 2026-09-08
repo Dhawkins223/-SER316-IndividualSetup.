@@ -13,8 +13,11 @@
 # report you can paste into an issue or hand back to an agent. It never mutates
 # anything: no deploy, no delete, no variable write, no restart.
 #
-# Variable VALUES are never printed -- only names. A report containing a
-# connection string is a leaked credential, and reports get pasted into chat.
+# Variable names are printed; values are not, with two deliberate exceptions:
+# HAWKNETIC_SERVICE and HAWKNETIC_SERVICE_MODE. Those are role and schedule
+# selectors -- "sports-research", "once" -- and they are the answer the report
+# exists to give. No other value is echoed. A report containing a connection
+# string is a leaked credential, and reports get pasted into chat.
 #
 # Usage:
 #   scripts/railway_inventory.sh                 # writes to stdout
@@ -117,17 +120,22 @@ PY
 {
   echo "## Variable names for the linked service"
   echo
-  echo "Names only. Values are deliberately omitted."
+  echo "Names only, except the role and mode selectors named below, whose values"
+  echo "are the point of the report. No other value is printed."
   echo
 } | emit
 
 if variables_json="$(railway variables --json 2>/dev/null)"; then
-  python3 - "$variables_json" <<'PY' | emit
+  # Through the environment, never argv: a process's command line is world
+  # readable through /proc, so passing the variables payload as an argument
+  # would expose every value it contains -- connection strings included -- to
+  # anything running on the machine for the lifetime of the call.
+  HAWKNETIC_RAILWAY_VARIABLES_JSON="$variables_json" python3 <<'PY' | emit
 import json
-import sys
+import os
 
 try:
-    variables = json.loads(sys.argv[1])
+    variables = json.loads(os.environ["HAWKNETIC_RAILWAY_VARIABLES_JSON"])
 except json.JSONDecodeError:
     print("Could not parse `railway variables --json`.")
     raise SystemExit(0)

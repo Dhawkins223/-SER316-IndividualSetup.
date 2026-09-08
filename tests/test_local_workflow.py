@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -31,17 +32,37 @@ class LocalScriptTestCase(unittest.TestCase):
         "HAWKNETIC_ALLOW_HOSTED_DATABASE",
     )
 
+    # Everything the script legitimately calls, minus Docker. Restricting the
+    # PATH to `cat` and `dirname` also hid `grep` and `cut`, which
+    # `local_env_value` runs whenever an untracked `.env` exists -- the normal
+    # state of a developer checkout, and of CI, which copies one. That emitted
+    # `grep: command not found` into every child's stderr, and it would have
+    # made any test that reached `db_start` fail on a missing interpreter
+    # rather than exercising the flow it meant to.
+    REQUIRED_EXECUTABLES = ("cat", "dirname", "grep", "cut", "sleep", "env")
+
+    def _bin_dir(self, tmp: str) -> Path:
+        bin_dir = Path(tmp)
+        for executable in self.REQUIRED_EXECUTABLES:
+            for candidate in (Path("/usr/bin"), Path("/bin"), Path("/usr/local/bin")):
+                target = candidate / executable
+                if target.exists():
+                    (bin_dir / executable).symlink_to(target)
+                    break
+        # The interpreter running this suite, not whichever python3 happens to
+        # sit in /usr/bin. `local.sh` falls back to `python3` when there is no
+        # .venv, and under actions/setup-python the system python3 is a
+        # different installation without psycopg -- so the external-mode
+        # connection check would die on an import rather than test anything.
+        (bin_dir / "python3").symlink_to(sys.executable)
+        return bin_dir
+
     def _run(self, command: str, **overrides: str) -> subprocess.CompletedProcess[str]:
         # GitHub-hosted runners have Docker in /usr/bin, while the minimal
         # execution environment used during development does not. Build the
         # PATH this test needs instead of assuming anything about the host.
         with tempfile.TemporaryDirectory() as tmp:
-            bin_dir = Path(tmp)
-            for executable in ("cat", "dirname"):
-                target = Path("/usr/bin") / executable
-                if not target.exists():
-                    target = Path("/bin") / executable
-                (bin_dir / executable).symlink_to(target)
+            bin_dir = self._bin_dir(tmp)
             env = {
                 key: value
                 for key, value in os.environ.items()
@@ -171,6 +192,86 @@ class ExternalDatabaseModeTests(LocalScriptTestCase):
         self.assertNotIn("POSTGRES_PASSWORD", result.stderr)
 
 
+class ExternalDatabaseConnectionTests(LocalScriptTestCase):
+    """Drives the real no-Docker path, not only its entry-point guards.
+
+    The guard tests above all exit before a connection is opened, so on their
+    own they leave the headline claim -- that development works with no Docker
+    daemon -- resting on the arguments never reaching a database. These run
+    `db-start` in external mode against the live test database, which is the
+    command every other external-mode workflow begins with.
+    """
+
+    def setUp(self) -> None:
+        self.url = os.environ.get("TEST_DATABASE_URL") or os.environ.get("DATABASE_URL")
+        if not self.url:
+            self.skipTest("no test database configured")
+
+    def test_two_urls_naming_one_database_are_refused(self) -> None:
+        """The string comparison cannot see this; only the server can.
+
+        Two URLs differing solely in connection options address the same
+        database. Accepting them lets `local.sh test` migrate and truncate the
+        developer's development data, so identity is settled by asking each
+        server what it is rather than by comparing the strings.
+        """
+
+        separator = "&" if "?" in self.url else "?"
+        disguised = f"{self.url}{separator}application_name=hawknetic_identity_probe"
+
+        result = self._run(
+            "db-start",
+            HAWKNETIC_DATABASE_URL=self.url,
+            HAWKNETIC_TEST_DATABASE_URL=disguised,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("resolve to the same database", result.stderr)
+
+    def test_distinct_databases_are_accepted(self) -> None:
+        """The success path: two real databases, no Docker, exit 0."""
+
+        try:
+            import psycopg
+        except ImportError:  # pragma: no cover - psycopg is a runtime dependency
+            self.skipTest("psycopg unavailable")
+
+        scratch = "hawknetic_local_sh_probe"
+        try:
+            with psycopg.connect(self.url, connect_timeout=10, autocommit=True) as connection:
+                connection.execute(f'DROP DATABASE IF EXISTS "{scratch}"')
+                connection.execute(f'CREATE DATABASE "{scratch}"')
+        except Exception as exc:  # noqa: BLE001 - a database this test may not create
+            self.skipTest(f"cannot create a scratch database: {exc}")
+
+        try:
+            scratch_url = self.url.rsplit("/", 1)[0] + "/" + scratch
+            result = self._run(
+                "db-start",
+                HAWKNETIC_DATABASE_URL=self.url,
+                HAWKNETIC_TEST_DATABASE_URL=scratch_url,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("resolve to the same database", result.stderr)
+            self.assertNotIn("Docker is required", result.stderr)
+            self.assertNotIn("command not found", result.stderr)
+        finally:
+            with psycopg.connect(self.url, connect_timeout=10, autocommit=True) as connection:
+                connection.execute(f'DROP DATABASE IF EXISTS "{scratch}"')
+
+    def test_no_missing_command_noise_reaches_stderr(self) -> None:
+        """`local_env_value` runs grep and cut whenever an untracked .env exists."""
+
+        result = self._run(
+            "db-status",
+            HAWKNETIC_DATABASE_URL=self.url,
+            HAWKNETIC_TEST_DATABASE_URL=self.url + "_other",
+        )
+
+        self.assertNotIn("command not found", result.stderr)
+
+
 class RecursionGuardTests(LocalScriptTestCase):
     """`local.sh test` must not be able to run itself.
 
@@ -191,7 +292,10 @@ class RecursionGuardTests(LocalScriptTestCase):
         self.assertIn("would recurse", result.stderr)
 
     def test_the_guard_covers_every_suite_running_command(self) -> None:
-        for command in ("test", "test-integration", "verify", "research-once"):
+        # Exactly the commands that invoke `unittest discover`. `research-once`
+        # is deliberately absent: it runs worker cycles and never starts the
+        # suite, so it cannot recurse and must not be refused.
+        for command in ("test", "test-integration", "verify"):
             with self.subTest(command=command):
                 result = self._run(
                     command,
@@ -200,6 +304,19 @@ class RecursionGuardTests(LocalScriptTestCase):
                     HAWKNETIC_LOCAL_SH_ACTIVE="1",
                 )
                 self.assertEqual(result.returncode, 3, result.stderr)
+
+    def test_research_once_is_not_refused(self) -> None:
+        """It runs worker cycles, never the suite, so it cannot fork-bomb."""
+
+        result = self._run(
+            "research-once",
+            HAWKNETIC_DATABASE_URL=ExternalDatabaseModeTests.LOCAL,
+            HAWKNETIC_TEST_DATABASE_URL=ExternalDatabaseModeTests.LOCAL_TEST,
+            HAWKNETIC_LOCAL_SH_ACTIVE="1",
+        )
+
+        self.assertNotEqual(result.returncode, 3)
+        self.assertNotIn("would recurse", result.stderr)
 
     def test_the_guard_does_not_block_ordinary_commands(self) -> None:
         """Only the suite recurses. `migrate` from inside a session is fine."""

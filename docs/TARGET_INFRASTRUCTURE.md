@@ -221,7 +221,7 @@ the thing making Railway cheap here.
 | Render | — | $0 (unused) |
 
 **Expected saving: roughly $4/month from scheduling, plus $5–10/month if an idle
-staging environment is retired — call it $50–170/year.**
+staging environment is retired — $48–168/year.**
 
 That is a real but modest number, and it should be read alongside the two changes
 here that are not about money at all: production currently has no automated

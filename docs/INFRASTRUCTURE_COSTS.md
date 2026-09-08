@@ -78,7 +78,10 @@ That range is set by unresolved facts, not measurement error.
 | --- | ---: | ---: |
 | Schedule 5 hourly-or-slower workers | ~$4 | ~$48 |
 | Retire an idle staging environment | $5–10 | $60–120 |
-| **Total** | **$4–14** | **$50–170** |
+| **Total** | **$4–14** | **$48–168** |
+
+The annual column is the monthly column × 12, and the total is the sum of its
+components: $4 alone if staging turns out not to be running, $14 if it is.
 
 The scheduling number is firm. The staging number depends on whether that
 environment is still running — verify before counting it.

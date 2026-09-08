@@ -428,9 +428,18 @@ def hosted_service_mode() -> str:
     schedule bills only the execution.
 
     Nothing about the cycle itself changes: `run_worker_once` still claims the
-    same cadence-derived idempotency key, so a cron service that fires twice,
-    or that overlaps a still-running loop worker during a cutover, records
-    `skipped_duplicate` rather than collecting the same evidence twice.
+    same cadence-derived idempotency key, so two runs that land in the same
+    cadence bucket -- a cron service that fires twice within one cadence
+    window -- record `skipped_duplicate` rather than collecting twice.
+
+    That guarantee is bucket-scoped, and it is worth being precise about what
+    it does not cover: `cadence_idempotency_key` buckets wall-clock time, and
+    `start_run` deduplicates on `(worker_name, idempotency_key)`. Two runs in
+    *different* buckets are not mutually excluded, so a loop cycle that
+    straddles a cadence boundary can still overlap a cron run that claims the
+    next bucket. This is not a lock. Deploy the mode change rather than running
+    both side by side: replacing the container leaves no second collector, and
+    `docs/DEPLOYMENT.md` gives the cutover in that order.
     """
 
     raw = str(os.environ.get("HAWKNETIC_SERVICE_MODE") or "loop").strip().lower()

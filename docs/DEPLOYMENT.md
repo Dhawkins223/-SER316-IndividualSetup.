@@ -80,13 +80,25 @@ schema fails its cycle and backs off, which is recoverable.
 
 ## Converting a worker to a scheduled service
 
-The cutover is safe in either order because `run_worker_once` claims a
-cadence-derived idempotency key: an overlapping loop worker and cron run make the
-second record `skipped_duplicate` rather than collect twice.
+**The cron schedule must not fire more often than the worker's own cadence.**
+`run_worker_once` claims an idempotency key derived from
+`SERVICE_SPECS.cadence_seconds`, so every run after the first inside one cadence
+window records `skipped_duplicate` and exits 0. A 15-minute schedule on
+`reporting-evaluation` (cadence 21,600 s) would produce four green runs an hour
+of which one collects — the logs look healthy while collection silently happens
+once per six hours. Match the schedule to the cadence, or change the cadence in
+`SERVICE_SPECS` deliberately.
+
+That same key is what protects the cutover against double collection, within one
+limit worth stating plainly: it deduplicates two runs landing in the *same*
+cadence bucket, and it is not a lock. A loop cycle that straddles a bucket
+boundary can still overlap a cron run that claims the next one. So change the
+mode by deploying rather than by running both side by side — replacing the
+container leaves no second collector.
 
 1. Set `HAWKNETIC_SERVICE_MODE=once` on the service.
 2. Set the cron schedule under **Service → Settings → Cron Schedule**.
-3. Deploy.
+3. Deploy. This replaces the always-on container rather than adding to it.
 4. Confirm one clean run: the deploy log ends with `worker_succeeded` and the
    container exits 0.
 5. Confirm the heartbeat advanced:
@@ -119,7 +131,7 @@ idempotence and the serialization on every run.
 Check state without applying:
 
 ```bash
-python -m kalshi_research_bot.db_command status
+PYTHONPATH=src python -m kalshi_research_bot.db_command status
 ```
 
 ## Verifying a deploy

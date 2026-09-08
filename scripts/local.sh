@@ -54,8 +54,13 @@ esac
 # instead run the suite again, and that child would run it again. The result is
 # a fork bomb, not a test failure. Refuse to re-enter rather than trusting every
 # caller to scrub the environment.
+#
+# Only the three commands that invoke `unittest discover` are listed, because
+# only those load the test module that re-enters this script. `research-once`
+# runs worker cycles and never starts the suite, so guarding it would refuse a
+# legitimate nested call for no protective benefit.
 case "$command_name" in
-  test|test-integration|verify|research-once)
+  test|test-integration|verify)
     if [[ -n "${HAWKNETIC_LOCAL_SH_ACTIVE:-}" ]]; then
       echo "Refusing to run '$command_name' from inside scripts/local.sh: this would recurse." >&2
       exit 3
@@ -171,17 +176,49 @@ external_database_ready() {
   # asking a managed database is whether it answers. A Neon branch that is
   # scaled to zero wakes up on this connection, so a slow first attempt is
   # expected rather than a failure.
+  #
+  # This also settles identity, which the string comparison above cannot. Two
+  # URLs that differ only in credentials or connection options -- a different
+  # user, an added sslmode -- name the same database, and `test` would then
+  # migrate and truncate the development one. Ask each server what it actually
+  # is and refuse when both answers match.
   local attempts=15
-  until "$python_bin" - "$(database_url "$app_database")" "$(database_url "$test_database")" <<'PY'
+  until HAWKNETIC_APP_URL="$(database_url "$app_database")" \
+        HAWKNETIC_TEST_URL="$(database_url "$test_database")" \
+        "$python_bin" <<'PY'
+import os
 import sys
 
 import psycopg
 
-for url in sys.argv[1:]:
+
+def identity(url):
     with psycopg.connect(url, connect_timeout=10) as connection:
-        connection.execute("SELECT 1")
+        # inet_server_addr() is NULL over a unix socket; the port and database
+        # name still separate two databases on one host, which is the case
+        # that matters here.
+        return connection.execute(
+            "SELECT current_database(), inet_server_addr()::text, inet_server_port()"
+        ).fetchone()
+
+
+app = identity(os.environ["HAWKNETIC_APP_URL"])
+test = identity(os.environ["HAWKNETIC_TEST_URL"])
+if app == test:
+    print(
+        "HAWKNETIC_DATABASE_URL and HAWKNETIC_TEST_DATABASE_URL resolve to the same "
+        f"database ({app[0]!r} on port {app[2]}). The test suite would destroy your "
+        "development data.",
+        file=sys.stderr,
+    )
+    raise SystemExit(3)
 PY
   do
+    # An identity clash is a configuration error, not a database still waking
+    # up. Retrying it fifteen times would only delay the message.
+    if [[ $? -eq 3 ]]; then
+      return 1
+    fi
     attempts=$((attempts - 1))
     if [[ "$attempts" -le 0 ]]; then
       echo "External PostgreSQL did not answer. Check HAWKNETIC_DATABASE_URL and HAWKNETIC_TEST_DATABASE_URL." >&2

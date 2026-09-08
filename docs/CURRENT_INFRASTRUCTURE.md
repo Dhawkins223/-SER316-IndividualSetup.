@@ -134,9 +134,16 @@ strength of this document.
 
 ### Cloudflare, Neon, Render
 
-Not used. No `wrangler.toml`, no `render.yaml`, no Neon connection handling, and
-no reference to any of the three anywhere in the tree. (Measured — a repository-wide
-search for provider hostnames returns nothing.)
+None of the three hosts anything, in production or anywhere else. There is no
+`wrangler.toml`, no `render.yaml`, no configured provider hostname, and no
+provider-specific connection handling. (Measured — a repository-wide search for
+provider hostnames returns no configured endpoint.)
+
+They are named in the tree, and the distinction matters in a document whose
+purpose is to separate fact from inference: `scripts/local.sh` and `.env.example`
+mention Neon as an optional managed *development* database, and `scripts/local.sh`
+and `README.md` mention Render only as a host the local workflow refuses to run
+tests against. Both are guidance and guards, not deployments.
 
 ### GitHub
 
