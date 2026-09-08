@@ -77,6 +77,9 @@ Hosted auth and integrations must be enabled deliberately, per environment.
 | `CRYPTO_RUN_ID`, `SPORTS_RUN_ID`, `KALSHI_RUN_ID` | Research lineage identifiers. |
 | `BOT_COMPANY_ENABLED` | Private bot-company orchestration switch. |
 | `HAWKNETIC_SERVICE` | Selects the single web role or one documented always-on worker role. |
+| `HAWKNETIC_SERVICE_MODE` | `loop` (default) keeps a worker running with its own cadence; `once` runs a single cycle and exits so the worker can be a scheduled, scale-to-zero Railway cron service. Ignored by the `web` role. An unrecognised value logs and falls back to `loop`. |
+| `HAWKNETIC_DATABASE_URL`, `HAWKNETIC_TEST_DATABASE_URL` | LOCAL/CODESPACE only, and `SECRET`. Set both to run `scripts/local.sh` against a managed development database instead of Compose, which removes the local Docker requirement. They must name different databases, and the script refuses a Railway or Render host unless `HAWKNETIC_ALLOW_HOSTED_DATABASE` is set. Never point either at production. |
+| `HAWKNETIC_ALLOW_HOSTED_DATABASE` | LOCAL/CODESPACE escape hatch that disables the hosted-host refusal above. Set it only for a database you are certain is disposable. |
 
 ## Research-only safety and intentionally disabled connectors
 
