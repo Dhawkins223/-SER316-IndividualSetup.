@@ -203,6 +203,10 @@ class ExternalDatabaseConnectionTests(LocalScriptTestCase):
     command every other external-mode workflow begins with.
     """
 
+    # Unmistakably this test's own. Cleanup is scoped to it, so it can never
+    # match a database a developer created.
+    SCRATCH_PREFIX = "hawknetic_probe_"
+
     def setUp(self) -> None:
         self.url = os.environ.get("TEST_DATABASE_URL") or os.environ.get("DATABASE_URL")
         if not self.url:
@@ -241,9 +245,20 @@ class ExternalDatabaseConnectionTests(LocalScriptTestCase):
         # plus `DROP DATABASE IF EXISTS` would destroy a developer's database
         # that happened to share the name -- the same class of accident this
         # whole guard exists to prevent.
-        scratch = f"hawknetic_probe_{uuid.uuid4().hex[:12]}"
+        scratch = f"{self.SCRATCH_PREFIX}{uuid.uuid4().hex[:12]}"
         try:
             with psycopg.connect(self.url, connect_timeout=10, autocommit=True) as connection:
+                # Reclaim anything a previous run leaked. A hard kill between
+                # CREATE and the DROP below orphans a uniquely-named database
+                # that no later run would ever revisit. Scoped to this test's
+                # own prefix, so unlike a fixed name it cannot match a
+                # developer's database.
+                orphans = connection.execute(
+                    "SELECT datname FROM pg_database WHERE datname LIKE %s",
+                    (self.SCRATCH_PREFIX.replace("_", r"\_") + "%",),
+                ).fetchall()
+                for (orphan,) in orphans:
+                    connection.execute(f'DROP DATABASE IF EXISTS "{orphan}"')
                 connection.execute(f'CREATE DATABASE "{scratch}"')
         except Exception as exc:  # noqa: BLE001 - a database this test may not create
             self.skipTest(f"cannot create a scratch database: {exc}")

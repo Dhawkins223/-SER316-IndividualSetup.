@@ -65,7 +65,16 @@ jobs:
           with open("/tmp/pip-audit.json", encoding="utf-8") as handle:
               report = json.load(handle)
 
-          dependencies = report.get("dependencies") or []
+          # pip-audit 2.9.0 emits {"dependencies": [...], "fixes": [...]};
+          # older versions emitted a bare list. Accept either rather than
+          # depending on the pin never moving.
+          if isinstance(report, dict):
+              dependencies = report.get("dependencies") or []
+          elif isinstance(report, list):
+              dependencies = report
+          else:
+              sys.exit(f"pip-audit report has an unexpected shape: {type(report).__name__}")
+
           if not dependencies:
               sys.exit("pip-audit audited no dependencies at all.")
 
