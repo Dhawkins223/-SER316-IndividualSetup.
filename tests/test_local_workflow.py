@@ -93,8 +93,8 @@ class ExternalDatabaseModeTests(LocalScriptTestCase):
     would fail loudly rather than silently passing on a host that has it.
     """
 
-    LOCAL = "postgresql://u:p@127.0.0.1:54329/dev"
-    LOCAL_TEST = "postgresql://u:p@127.0.0.1:54329/dev_test"
+    LOCAL = "postgresql://127.0.0.1:54329/dev"
+    LOCAL_TEST = "postgresql://127.0.0.1:54329/dev_test"
 
     def test_both_urls_are_required(self) -> None:
         result = self._run("migrate", HAWKNETIC_DATABASE_URL=self.LOCAL)
@@ -121,7 +121,7 @@ class ExternalDatabaseModeTests(LocalScriptTestCase):
         result = self._run(
             "migrate",
             HAWKNETIC_DATABASE_URL=self.LOCAL,
-            HAWKNETIC_TEST_DATABASE_URL="postgresql://u:p@monorail.proxy.rlwy.net:1234/railway",
+            HAWKNETIC_TEST_DATABASE_URL="postgresql://monorail.proxy.rlwy.net:1234/railway",
         )
 
         self.assertEqual(result.returncode, 2)
@@ -131,7 +131,7 @@ class ExternalDatabaseModeTests(LocalScriptTestCase):
         result = self._run(
             "db-status",
             HAWKNETIC_DATABASE_URL=self.LOCAL,
-            HAWKNETIC_TEST_DATABASE_URL="postgresql://u:p@monorail.proxy.rlwy.net:1234/railway",
+            HAWKNETIC_TEST_DATABASE_URL="postgresql://monorail.proxy.rlwy.net:1234/railway",
             HAWKNETIC_ALLOW_HOSTED_DATABASE="1",
         )
 
