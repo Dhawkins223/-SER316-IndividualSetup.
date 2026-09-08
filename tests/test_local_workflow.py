@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -15,14 +16,20 @@ class LocalWorkflowEntrypointTests(unittest.TestCase):
     def _run(self, command: str, **overrides: str) -> subprocess.CompletedProcess[str]:
         # GitHub-hosted runners have Docker in /usr/bin, while the minimal
         # execution environment used during development does not. Build the
-        # PATH this test needs instead of assuming anything about the host.
+        # PATH this test needs instead of assuming anything about the host:
+        # everything the script legitimately calls, and deliberately not
+        # `docker`, which is the condition under test.
+        #
+        # These are resolved rather than hardcoded to /usr/bin because the
+        # interpreter that matters is whichever `python3` the job installed the
+        # package into -- on a runner that is under /opt/hostedtoolcache.
         with tempfile.TemporaryDirectory() as tmp:
             bin_dir = Path(tmp)
-            for executable in ("cat", "dirname"):
-                target = Path("/usr/bin") / executable
-                if not target.exists():
-                    target = Path("/bin") / executable
-                (bin_dir / executable).symlink_to(target)
+            for executable in ("cat", "dirname", "grep", "cut", "python3"):
+                resolved = shutil.which(executable)
+                if resolved is None:
+                    continue
+                (bin_dir / executable).symlink_to(resolved)
             # Pin the database settings rather than inheriting them. A developer
             # who happens to have PostgreSQL listening on the project's port
             # would otherwise have these preflight tests connect to it and
