@@ -29,21 +29,38 @@ On a volume with no free space PostgreSQL cannot finish recovery, so it exits
 during startup — every time. Restarting or redeploying the service reproduces
 the failure exactly. **The volume has to grow before anything else can work.**
 
-### Check this first — it may cost nothing
+### Check this first — it might cost nothing, but check the date
 
 Before upgrading anything, open **`Postgres-gxQB` → Backups** in the Railway
-dashboard.
+dashboard. Railway mounts a restored snapshot as a **new** volume and leaves the
+current one in the project, unmounted, so a restore is reversible: the full
+volume is still there if it turns out to be wrong.
 
-If a backup exists from before 2026-09-01, restoring it is the cheap way out.
-Railway mounts the restored snapshot as a **new** volume and leaves the current
-one in the project, unmounted — so the database comes up on data that predates
-the fill, with room to breathe, and the full volume is still there if the
-restore turns out to be wrong. You lose whatever was collected between the
-backup and the fill; you skip the plan upgrade entirely.
+**A backup only helps if it is old enough.** The volume filled because retention
+never bit, so the database grew monotonically — which means a snapshot from
+shortly before the PANIC contains a near-full dataset and restores onto a fresh
+5 GB volume with no headroom at all. It would come up, keep collecting at
+~250 MB/day, and PANIC again within days.
 
-If the Backups tab is empty, backups were never scheduled, and the resize path
-below is the only one. Either way, turn on a **Daily** schedule once the
-database is healthy again.
+Work out which backups are actually useful from the growth rate:
+
+| Snapshot date | Approximate size | Useful? |
+| --- | ---: | --- |
+| 2026-07-25 (measured, `docs/railway-volume-storage-audit.md`) | 778 MB | yes — real headroom |
+| ~2026-08-11 (extrapolated at ~250 MB/day) | ~5 GB | no — already at the ceiling |
+| Anything after mid-August | full | no |
+
+Railway's retention makes this narrower still: daily backups are kept 6 days and
+weekly 27, so by now both only cover the period when the volume was already full.
+**Only a monthly snapshot from June or July is likely to help**, and only if a
+monthly schedule was enabled back then.
+
+So: if there is a snapshot from July or earlier, restore it, then go straight to
+step 4 below and prune before the backlog rebuilds. If the only snapshots are
+from August or September — or the tab is empty because backups were never
+scheduled — restoring buys nothing and the resize path is the only way through.
+
+Either way, turn on a **Daily** schedule once the database is healthy again.
 
 ### Prerequisites for the resize path
 
@@ -121,7 +138,7 @@ the table and `VACUUM FULL` is what returns it to the filesystem — and
    `database_capacity` anomaly at 75% used and a critical one at 90%.
 
 7. **Decide on the plan.** With the database at ~2.5 GB, Hobby's 5 GB ceiling is
-   viable again and is $6.29/month cheaper. Downgrading requires the volume to
+   viable again and is $6.69/month cheaper. Downgrading requires the volume to
    be within Hobby's limits; volumes cannot be shrunk, so a 15 GB volume keeps
    the account on Pro. Staying on Pro is the more conservative choice for a
    database that has hit its ceiling twice.

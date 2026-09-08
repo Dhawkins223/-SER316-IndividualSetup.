@@ -263,5 +263,5 @@ this audit, `local.sh` exited 127 without Docker, so every command — including
 running tests — required a container runtime.
 
 The full suite was verified during this audit against a system PostgreSQL with
-no Docker at all: **1045 tests, 145 seconds**. Docker is a convenience for this
+no Docker at all: **1047 tests, 128 seconds**. Docker is a convenience for this
 project, not a requirement.

@@ -14,7 +14,7 @@ variable inventory.
 ```
 commit → push to Master → GitHub
                             │
-                            ├── GitHub Actions: lint · wheel · migrations · 1045 tests · browser checks
+                            ├── GitHub Actions: lint · wheel · migrations · 1047 tests · browser checks
                             │
                             └── Railway: build (Railpack) → pre-deploy migration → start
 ```
@@ -192,7 +192,7 @@ A service that has never deployed cannot be started by redeploy — it needs
 ## Pre-deploy checklist
 
 1. `python -m ruff check .`
-2. `./scripts/local.sh test` — the full suite, 1045 tests
+2. `./scripts/local.sh test` — the full suite, 1047 tests
 3. `./scripts/local.sh verify` — configuration, migrations, tests, smoke
 4. Confirm any new `.env.example` key is in `docs/environment-variables.md`
 5. Confirm new migrations apply twice cleanly (CI does this; it catches

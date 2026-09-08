@@ -15,7 +15,7 @@ alarm on volume capacity before it is spent.
 ```
 GitHub  (source of truth, public repository)
   │
-  ├── GitHub Actions ─ lint · migrations · 1045 tests · browser checks
+  ├── GitHub Actions ─ lint · migrations · 1047 tests · browser checks
   │                    (free for public repositories)
   │
   └── Railway  ── Hobby plan, project `jubilant-liberation`, region iad
@@ -240,7 +240,7 @@ container runtime. It now supports three modes via `HAWKNETIC_LOCAL_DB`:
 | `external` | Use a PostgreSQL that is already running |
 
 Compose and the Codespaces flow are untouched and remain canonical. The full
-suite — **1045 tests, 145 seconds** — was verified during this audit against a
+suite — **1047 tests, 128 seconds** — was verified during this audit against a
 system PostgreSQL 16 with no Docker running.
 
 ## What has to happen next, and who can do it
@@ -249,8 +249,10 @@ Three things need the account owner, because the Railway API available to this
 audit cannot do them and because two of them destroy data.
 
 1. **Recover the production database.** It cannot restart on a full volume.
-   Check the service's Backups tab first — restoring a pre-2026-09-01 snapshot
-   mounts a fresh volume and costs nothing. Failing that, the volume has to grow,
+   Check the service's Backups tab first, but check the dates: the database grew
+   monotonically, so only a snapshot from July or earlier has real headroom — a
+   later one restores a near-full dataset that re-fills within days. Failing
+   that, the volume has to grow,
    which Railway's published limits put on the Pro plan. `docs/ROLLBACK.md` has
    the ordered runbook and the reason each step comes where it does.
 2. **Delete the two obsolete staging databases** — after taking a backup. They

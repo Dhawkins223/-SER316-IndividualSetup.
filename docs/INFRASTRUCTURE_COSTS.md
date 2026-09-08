@@ -133,7 +133,7 @@ Recovering the database needs volume headroom, and Hobby caps volumes at 5 GB.
 | Self-serve volume ceiling | 5 GB | 1 TB |
 | Bill at the target $13.31 of usage | **$13.31** | **$20.00** |
 
-Pro costs **$6.29/month more** at this usage level and buys the ability to grow
+Pro costs **$6.69/month more** at this usage level and buys the ability to grow
 a volume — which, on a database that has now hit its ceiling twice, is worth
 considering on reliability grounds rather than cost grounds. Both options remain
 far below the $39.81 baseline.
