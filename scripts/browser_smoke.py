@@ -210,14 +210,14 @@ def main() -> int:
                                 exercise_sheet(page, check_a11y=width == 320)
                                 if state == "live":
                                     exercise_navigation(page)
+                            if state == "live" and width == 1440:
+                                exercise_responsive_focus(page)
                             assert not errors, errors
                         except Exception as error:
                             page.screenshot(path=str(artifact_dir / f"failure-{role}-{state}-{width}.png"), full_page=True)
                             raise AssertionError(f"{label}: {error}") from error
                         if state == "live" and width in {1440, 390}:
                             page.screenshot(path=str(artifact_dir / f"{role}-{width}.png"), full_page=True)
-                        if state == "live" and width == 1440:
-                            exercise_responsive_focus(page)
                         checked.append(label)
                         context.close()
 
