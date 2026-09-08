@@ -193,25 +193,57 @@ import psycopg
 
 
 def identity(url):
+    """The database's name, and the cluster it lives in.
+
+    Addresses are not identity. The same database reached over a unix socket
+    and over TCP reports inet_server_addr() as NULL and as 127.0.0.1, so
+    comparing addresses would call one database two, and the destructive test
+    suite would then run against the development database -- exactly the
+    accident this check exists to stop. The cluster's system_identifier is
+    stable across both.
+    """
+
     with psycopg.connect(url, connect_timeout=10) as connection:
-        # inet_server_addr() is NULL over a unix socket; the port and database
-        # name still separate two databases on one host, which is the case
-        # that matters here.
-        return connection.execute(
-            "SELECT current_database(), inet_server_addr()::text, inet_server_port()"
-        ).fetchone()
+        name = connection.execute("SELECT current_database()").fetchone()[0]
+        try:
+            cluster = connection.execute(
+                "SELECT system_identifier FROM pg_control_system()"
+            ).fetchone()[0]
+        except psycopg.Error:
+            # Restricted to superusers unless granted, so a managed provider
+            # may refuse it. Absence is handled conservatively below.
+            cluster = None
+        return name, cluster
 
 
-app = identity(os.environ["HAWKNETIC_APP_URL"])
-test = identity(os.environ["HAWKNETIC_TEST_URL"])
-if app == test:
+app_name, app_cluster = identity(os.environ["HAWKNETIC_APP_URL"])
+test_name, test_cluster = identity(os.environ["HAWKNETIC_TEST_URL"])
+
+if app_name != test_name:
+    # Different names cannot be one database, wherever they live.
+    raise SystemExit(0)
+
+if app_cluster is not None and test_cluster is not None and app_cluster != test_cluster:
+    # Same name, provably different clusters: two databases that happen to
+    # share a name. Allowed.
+    raise SystemExit(0)
+
+if app_cluster is None or test_cluster is None:
     print(
-        "HAWKNETIC_DATABASE_URL and HAWKNETIC_TEST_DATABASE_URL resolve to the same "
-        f"database ({app[0]!r} on port {app[2]}). The test suite would destroy your "
-        "development data.",
+        f"Both URLs name a database called {app_name!r}, and this server would not "
+        "report its cluster identity, so they cannot be proven distinct. Give the "
+        "development and test databases different names.",
         file=sys.stderr,
     )
     raise SystemExit(3)
+
+print(
+    "HAWKNETIC_DATABASE_URL and HAWKNETIC_TEST_DATABASE_URL resolve to the same "
+    f"database ({app_name!r} in cluster {app_cluster}). The test suite would "
+    "destroy your development data.",
+    file=sys.stderr,
+)
+raise SystemExit(3)
 PY
   do
     # An identity clash is a configuration error, not a database still waking

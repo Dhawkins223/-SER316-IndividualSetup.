@@ -84,10 +84,10 @@ schema fails its cycle and backs off, which is recoverable.
 `run_worker_once` claims an idempotency key derived from
 `SERVICE_SPECS.cadence_seconds`, so every run after the first inside one cadence
 window records `skipped_duplicate` and exits 0. A 15-minute schedule on
-`reporting-evaluation` (cadence 21,600 s) would produce four green runs an hour
-of which one collects — the logs look healthy while collection silently happens
-once per six hours. Match the schedule to the cadence, or change the cadence in
-`SERVICE_SPECS` deliberately.
+`reporting-evaluation`, whose cadence is 21,600 s, fires 24 times per six-hour
+window and collects on exactly one of them — 24 green runs for one collection.
+The logs look healthy throughout. Match the schedule to the cadence, or change
+the cadence in `SERVICE_SPECS` deliberately.
 
 That same key is what protects the cutover against double collection, within one
 limit worth stating plainly: it deduplicates two runs landing in the *same*

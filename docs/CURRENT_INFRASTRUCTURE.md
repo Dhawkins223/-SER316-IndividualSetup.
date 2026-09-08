@@ -140,10 +140,12 @@ provider-specific connection handling. (Measured — a repository-wide search fo
 provider hostnames returns no configured endpoint.)
 
 They are named in the tree, and the distinction matters in a document whose
-purpose is to separate fact from inference: `scripts/local.sh` and `.env.example`
-mention Neon as an optional managed *development* database, and `scripts/local.sh`
-and `README.md` mention Render only as a host the local workflow refuses to run
-tests against. Both are guidance and guards, not deployments.
+purpose is to separate fact from inference. `scripts/local.sh` and `.env.example`
+name Neon as an optional managed *development* database. Render appears in
+`scripts/local.sh` as a host the local workflow refuses to run tests against, and
+in `README.md` and this repository's own infrastructure documents as a provider
+that was evaluated and rejected. None of those mentions is a deployment: they are
+guidance, guards, and decisions recorded with their reasons.
 
 ### GitHub
 

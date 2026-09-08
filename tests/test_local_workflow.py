@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 
 
@@ -236,16 +237,23 @@ class ExternalDatabaseConnectionTests(LocalScriptTestCase):
         except ImportError:  # pragma: no cover - psycopg is a runtime dependency
             self.skipTest("psycopg unavailable")
 
-        scratch = "hawknetic_local_sh_probe"
+        # Unique per run, and created without a preceding DROP. A fixed name
+        # plus `DROP DATABASE IF EXISTS` would destroy a developer's database
+        # that happened to share the name -- the same class of accident this
+        # whole guard exists to prevent.
+        scratch = f"hawknetic_probe_{uuid.uuid4().hex[:12]}"
         try:
             with psycopg.connect(self.url, connect_timeout=10, autocommit=True) as connection:
-                connection.execute(f'DROP DATABASE IF EXISTS "{scratch}"')
                 connection.execute(f'CREATE DATABASE "{scratch}"')
         except Exception as exc:  # noqa: BLE001 - a database this test may not create
             self.skipTest(f"cannot create a scratch database: {exc}")
 
         try:
-            scratch_url = self.url.rsplit("/", 1)[0] + "/" + scratch
+            # Keep any query string: `?sslmode=require` sits after the database
+            # name, so splitting on the last "/" alone would drop connection
+            # options the server requires.
+            base, _, query = self.url.partition("?")
+            scratch_url = base.rsplit("/", 1)[0] + "/" + scratch + (f"?{query}" if query else "")
             result = self._run(
                 "db-start",
                 HAWKNETIC_DATABASE_URL=self.url,
@@ -306,17 +314,21 @@ class RecursionGuardTests(LocalScriptTestCase):
                 self.assertEqual(result.returncode, 3, result.stderr)
 
     def test_research_once_is_not_refused(self) -> None:
-        """It runs worker cycles, never the suite, so it cannot fork-bomb."""
+        """It runs worker cycles, never the suite, so it cannot fork-bomb.
 
-        result = self._run(
-            "research-once",
-            HAWKNETIC_DATABASE_URL=ExternalDatabaseModeTests.LOCAL,
-            HAWKNETIC_TEST_DATABASE_URL=ExternalDatabaseModeTests.LOCAL_TEST,
-            HAWKNETIC_LOCAL_SH_ACTIVE="1",
-        )
+        Deliberately run in Compose mode with no external URLs, so it stops at
+        the missing-Docker guard immediately. Pointing it at an unreachable
+        external database instead would send it into `external_database_ready`,
+        whose retry loop costs thirty seconds of connection timeouts on every
+        run of the suite to assert one exit code.
+        """
+
+        result = self._run("research-once", HAWKNETIC_LOCAL_SH_ACTIVE="1")
 
         self.assertNotEqual(result.returncode, 3)
         self.assertNotIn("would recurse", result.stderr)
+        # Reached the backend selection, which is past the recursion guard.
+        self.assertIn("Docker is required", result.stderr)
 
     def test_the_guard_does_not_block_ordinary_commands(self) -> None:
         """Only the suite recurses. `migrate` from inside a session is fine."""

@@ -122,7 +122,10 @@ jobs:
             # understand fails its cycle until the migration lands. Without it
             # a populated worker list would deploy workers and no migration at
             # all, which is worse than deploying nothing.
-            if [ -z "$WEB_SERVICE" ]; then
+            # Whitespace-only counts as unset. A repository variable typed as
+            # a space would otherwise pass -z and deploy every worker with no
+            # migration behind them.
+            if [ -z "$(printf '%s' "$WEB_SERVICE" | tr -d '[:space:]')" ]; then
               echo "RAILWAY_WEB_SERVICE is required for a full deployment: it carries the migration." >&2
               exit 1
             fi
