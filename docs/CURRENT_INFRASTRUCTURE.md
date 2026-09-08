@@ -34,7 +34,7 @@ frontend build. (Measured.)
 | Web framework | None. `paper_server.py` is a stdlib HTTP server |
 | Frontend | Server-rendered HTML plus 160 KB of static assets shipped in the wheel |
 | Queue / cache / Redis | None. The `ops` schema in PostgreSQL is the coordination layer |
-| Tests | 1053, ~112 s against a real PostgreSQL |
+| Tests | 1057, ~2 minutes against a real PostgreSQL |
 
 The dashboard and `/api/v1` are served by the same process. Roles are selected
 at start by `HAWKNETIC_SERVICE`: `web`, or one of eight workers.
@@ -82,7 +82,7 @@ the planning range and the floors above as the hard lower bound.
 graph TB
     subgraph GH["GitHub — source of truth"]
         REPO[Master branch]
-        CI["Actions: PostgreSQL validation<br/>1053 tests + browser + lint"]
+        CI["Actions: PostgreSQL validation<br/>1057 tests + browser + lint"]
     end
 
     subgraph RW["Railway — the only hosted runtime"]

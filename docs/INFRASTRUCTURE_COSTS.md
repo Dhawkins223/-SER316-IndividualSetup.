@@ -30,7 +30,7 @@ Import-time floors, not steady state. With a connection pool of up to 5 and a
 cycle's working set, plan on **60–120 MB per running service**.
 
 Other measurements: development database after all 16 migrations is **13.5 MB**;
-static dashboard assets total **160 KB**; the test suite is 1053 tests in ~112 s.
+static dashboard assets total **160 KB**; the test suite is 1057 tests in about two minutes.
 
 Recorded from `docs/railway-volume-storage-audit.md` (2026-07-25): production
 volume **778.44 MB of 5,000 MB**; staging PostgreSQL volume **341.11 MB of
@@ -152,7 +152,7 @@ dependency is Railway, which is where the reliability requirement is.
 ## Keeping this current
 
 `scripts/railway_inventory.sh` reports services, roles, and which workers have
-actually completed a cycle — read-only, and it prints variable names without
-values. Per-service metered usage is in the Railway dashboard under **Usage**;
+actually completed a cycle — read-only, and it prints variable names rather than
+their values, except the role and mode selectors that are the point of the report. Per-service metered usage is in the Railway dashboard under **Usage**;
 record it here when you read it, since nothing in the repository can substitute
 for that number.

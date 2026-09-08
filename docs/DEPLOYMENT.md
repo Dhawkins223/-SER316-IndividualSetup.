@@ -8,7 +8,7 @@ Read `TARGET_INFRASTRUCTURE.md` for *why* the architecture is shaped this way.
 
 ```text
 push / pull request
-   -> PostgreSQL validation  (lint, wheel, migrations, 1053 tests, 40 browser checks)
+   -> PostgreSQL validation  (lint, wheel, migrations, 1057 tests, 40 browser checks)
    -> Dependency and secret scanning
    -> [Master only] Deploy to Railway
         -> web service first  (carries the pre-deploy migration)
@@ -164,9 +164,11 @@ export HAWKNETIC_TEST_DATABASE_URL='postgresql://.../dev_test'
 ./scripts/local.sh test
 ```
 
-Both URLs are required and must name different databases — `test` writes to the
-test database. A Railway or Render host is refused unless
-`HAWKNETIC_ALLOW_HOSTED_DATABASE` is set. Never point either at production.
+Both URLs are required and must resolve to different databases — `test` writes to
+the test database, and the script asks each server for `current_database()` and
+its address, so two URLs differing only in credentials or options are refused. A
+Railway or Render host is refused unless `HAWKNETIC_ALLOW_HOSTED_DATABASE` is
+set. Never point either at production.
 
 ## Rules
 

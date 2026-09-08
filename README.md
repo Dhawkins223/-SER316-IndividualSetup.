@@ -54,10 +54,12 @@ export HAWKNETIC_TEST_DATABASE_URL='postgresql://.../dev_test'
 ./scripts/local.sh test
 ```
 
-Both are required and must name different databases: `test` writes to the test
-database, so sharing one would destroy development data. A Railway or Render host
-is refused unless `HAWKNETIC_ALLOW_HOSTED_DATABASE` is set. Never point either at
-production.
+Both are required and must resolve to different databases: `test` writes to the
+test database, so sharing one would destroy development data. Comparing the URLs
+is not enough — two that differ only in credentials or connection options name
+the same database — so each server is asked for `current_database()` and its
+address before anything runs. A Railway or Render host is refused unless
+`HAWKNETIC_ALLOW_HOSTED_DATABASE` is set. Never point either at production.
 
 `compose.yml` is retained as the offline fallback and is what CI uses.
 
@@ -83,7 +85,8 @@ does **not** move to Neon — at this workload's cadence Neon's scale-to-zero ca
 engage, which makes it roughly $17/month more expensive, not less.
 
 `scripts/railway_inventory.sh` reports the deployed services read-only, printing
-variable names without values.
+variable names rather than their values — except the role and mode selectors,
+which are the answer it exists to give.
 
 ## Database contract
 
