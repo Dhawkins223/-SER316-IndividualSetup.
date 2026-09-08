@@ -42,9 +42,48 @@ Useful commands:
 `db-reset` destroys only the Codespace Compose volume and requires the explicit
 `RESET` confirmation. It never contacts Railway.
 
+### Developing without Docker
+
+Compose is one backend, not a prerequisite. To work with no Docker daemon at all
+— a managed development database such as two Neon branches, or a PostgreSQL
+installed directly on the machine — set both URLs and Compose is never invoked:
+
+```bash
+export HAWKNETIC_DATABASE_URL='postgresql://.../dev'
+export HAWKNETIC_TEST_DATABASE_URL='postgresql://.../dev_test'
+./scripts/local.sh test
+```
+
+Both are required and must name different databases: `test` writes to the test
+database, so sharing one would destroy development data. A Railway or Render host
+is refused unless `HAWKNETIC_ALLOW_HOSTED_DATABASE` is set. Never point either at
+production.
+
+`compose.yml` is retained as the offline fallback and is what CI uses.
+
 See [Cloud development](docs/cloud-development.md) for setup, Secrets, ports,
 tests, database commands, the Railway configuration audit, staging proposal,
 logs, rollback, and the complete Windows/Docker Desktop retirement boundary.
+
+## Infrastructure
+
+| Document | Contents |
+| --- | --- |
+| [Current infrastructure](docs/CURRENT_INFRASTRUCTURE.md) | What runs today, measured footprints, security posture, and what cannot be settled without account access |
+| [Target infrastructure](docs/TARGET_INFRASTRUCTURE.md) | The provider decision for Railway, Cloudflare, Neon, and Render, with the evidence for each |
+| [Infrastructure costs](docs/INFRASTRUCTURE_COSTS.md) | Rates, measured consumption, savings, and what would make costs rise |
+| [Deployment](docs/DEPLOYMENT.md) | How a reviewed commit reaches production, and per-service configuration |
+| [Rollback](docs/ROLLBACK.md) | Recovering a deploy, a migration, or a worker |
+
+In short: Railway stays as the application platform and the production database;
+five hourly-or-slower workers become scheduled scale-to-zero services rather than
+containers that sleep; Neon covers development and CI databases only; Cloudflare
+provides DNS, TLS, and WAF in front of Railway; Render is not used. The database
+does **not** move to Neon — at this workload's cadence Neon's scale-to-zero cannot
+engage, which makes it roughly $17/month more expensive, not less.
+
+`scripts/railway_inventory.sh` reports the deployed services read-only, printing
+variable names without values.
 
 ## Database contract
 
@@ -143,6 +182,7 @@ Hosted staging and production are separate from local development and must use d
 - The sports board (`/sports.json` and the dashboard's sports panel) reads the rows the `sports-research` worker uploads. It reports `fresh`, `stale`, `blocked`, `empty`, or `unavailable` explicitly and withholds rows in every state except `fresh`. Each market publishes both the shopper's de-vig of the best available prices and the books' own consensus — each book de-vigged on its own, then the median — plus the signed gap between them. See `docs/sports-data-upload.md`.
 - Closing line value (`/sports-clv.json`, `sports-clv`) grades each recorded price against the last pre-start quote posted by the same bookmaker for the same market. It is a price comparison in probability points, not profit and not a settled result.
 - Other worker roles use the names documented by `python -m kalshi_research_bot worker --help`; they remain isolated from the web process.
+- `HAWKNETIC_SERVICE_MODE` selects how a worker runs. `loop` (the default) keeps the process resident and uses the worker's own cadence. `once` runs a single cycle and exits, so an hourly or slower worker can be a scheduled scale-to-zero service instead of a container that spends almost all of its life asleep. Switching is one variable and involves no data or schema change; an overlapping cron run and loop worker record `skipped_duplicate` rather than collecting twice. See `docs/DEPLOYMENT.md`.
 
 - `docs/data-sources.md`
 - `docs/sports-data-upload.md`
