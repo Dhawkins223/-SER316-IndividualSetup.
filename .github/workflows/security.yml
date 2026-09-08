@@ -1,0 +1,88 @@
+name: Dependency and secret scanning
+
+# The runtime dependency set is deliberately tiny (psycopg and psycopg_pool),
+# which makes a vulnerability in one of them proportionally more important:
+# there is nothing else in the tree to absorb it. A weekly schedule catches an
+# advisory published against a version this repository already pins, which a
+# push-triggered job would only notice on the next unrelated commit.
+on:
+  push:
+    branches: [Master]
+  pull_request:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dependencies:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install the project and the auditor
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+          python -m pip install pip-audit==2.9.0
+
+      - name: Audit installed dependencies
+        # The project itself is an unpublished local package; pip-audit cannot
+        # look it up and would fail the run on that alone.
+        run: python -m pip_audit --skip-editable --strict
+
+  secrets:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Gitleaks compares commits, so a shallow clone reports nothing on a
+          # push that added the secret in an earlier commit of the same branch.
+          fetch-depth: 0
+
+      - name: Scan history for committed credentials
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  configuration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Refuse tracked environment files
+        # .gitignore already excludes these. This asserts that no future commit
+        # adds one with `git add -f`, which is exactly how the mistake happens.
+        run: |
+          set -euo pipefail
+          tracked="$(git ls-files -- '.env' '.env.*' '*.pem' '*.key' '*.p8' 'config/sources.json' \
+            | grep -v '^\.env\.example$' || true)"
+          if [ -n "$tracked" ]; then
+            echo "Refusing tracked secret-bearing files:" >&2
+            echo "$tracked" >&2
+            exit 1
+          fi
+
+      - name: Refuse a production database default in tracked configuration
+        # Every hosted connection string must arrive from provider variables.
+        # A default baked into a tracked file is both a credential leak and a
+        # way for a test process to reach production.
+        run: |
+          set -euo pipefail
+          if git grep -nIE 'postgres(ql)?://[^[:space:]"'"'"']*@[^[:space:]"'"'"']*(railway|rlwy|render|neon|supabase)' \
+              -- . ':!docs/*' ':!*.md' > /tmp/hits 2>/dev/null; then
+            echo "Hosted connection string committed to the repository:" >&2
+            cut -d: -f1,2 /tmp/hits >&2
+            exit 1
+          fi
+          echo "No hosted connection strings in tracked configuration."

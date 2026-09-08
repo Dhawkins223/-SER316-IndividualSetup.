@@ -1,0 +1,132 @@
+name: Deploy to Railway
+
+# Production must never advance from an unreviewed branch or a failing check.
+# `workflow_run` fires only after "PostgreSQL validation" has finished, and the
+# guard job below refuses anything whose conclusion was not `success`, so a red
+# validation run cannot reach production. `push` cannot express that ordering.
+on:
+  workflow_run:
+    workflows: ["PostgreSQL validation"]
+    branches: [Master]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      service:
+        description: "Single service to deploy (blank deploys every configured service)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  # Two deploys of the same service racing produces an undefined winner. Queue
+  # them instead, and never cancel one in flight -- a half-applied deploy is
+  # worse than a slow one.
+  group: railway-production
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    outputs:
+      deployable: ${{ steps.decide.outputs.deployable }}
+    steps:
+      - id: decide
+        env:
+          EVENT: ${{ github.event_name }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          HAS_TOKEN: ${{ secrets.RAILWAY_TOKEN != '' }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "workflow_run" ] && [ "$CONCLUSION" != "success" ]; then
+            echo "Validation concluded '$CONCLUSION'; refusing to deploy." >&2
+            echo "deployable=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$HAS_TOKEN" != "true" ]; then
+            # Not a failure: the repository is simply not wired to Railway yet.
+            # Failing here would paint every merge red for a step nobody has
+            # opted into.
+            echo "::notice::RAILWAY_TOKEN is not set; skipping deployment."
+            echo "deployable=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "deployable=true" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    needs: gate
+    if: needs.gate.outputs.deployable == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: production
+    env:
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      # Set these as repository variables. RAILWAY_WEB_SERVICE is the dashboard
+      # service that owns the pre-deploy migration; RAILWAY_WORKER_SERVICES is a
+      # space-separated list of worker services built from this repository.
+      WEB_SERVICE: ${{ vars.RAILWAY_WEB_SERVICE }}
+      WORKER_SERVICES: ${{ vars.RAILWAY_WORKER_SERVICES }}
+      ONLY_SERVICE: ${{ inputs.service }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # workflow_run checks out the default branch by default, which is not
+          # necessarily the commit that passed validation.
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli@4
+
+      - name: Confirm the CLI is authenticated
+        run: railway whoami
+
+      - name: Deploy
+        run: |
+          set -euo pipefail
+          if [ -n "$ONLY_SERVICE" ]; then
+            targets="$ONLY_SERVICE"
+          else
+            # The web service carries the pre-deploy migration, so it goes
+            # first: a worker that starts against a schema it does not
+            # understand fails its cycle until the migration lands.
+            targets="$WEB_SERVICE $WORKER_SERVICES"
+          fi
+          if [ -z "$(echo "$targets" | tr -d '[:space:]')" ]; then
+            echo "No services configured. Set the RAILWAY_WEB_SERVICE repository variable." >&2
+            exit 1
+          fi
+          for service in $targets; do
+            echo "::group::Deploying $service"
+            railway up --service "$service" --ci
+            echo "::endgroup::"
+          done
+
+  verify:
+    needs: deploy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Probe the public health endpoint
+        env:
+          HEALTHCHECK_URL: ${{ vars.PRODUCTION_HEALTHCHECK_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${HEALTHCHECK_URL:-}" ]; then
+            echo "::notice::PRODUCTION_HEALTHCHECK_URL is not set; skipping post-deploy probe."
+            exit 0
+          fi
+          # Railway replaces the container rather than draining it, so the first
+          # probes after a deploy legitimately fail while the new one boots.
+          for attempt in $(seq 1 20); do
+            if curl -fsS --max-time 10 "$HEALTHCHECK_URL" -o /tmp/healthz.json; then
+              cat /tmp/healthz.json
+              status="$(python3 -c 'import json;print(json.load(open("/tmp/healthz.json"))["status"])')"
+              test "$status" = "ok"
+              echo "Health check passed on attempt $attempt."
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "Health endpoint did not report ok after the deploy." >&2
+          exit 1
