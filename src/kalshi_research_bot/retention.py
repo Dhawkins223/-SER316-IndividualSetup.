@@ -380,24 +380,78 @@ def volume_capacity_bytes() -> int:
     return parsed if parsed > 0 else DEFAULT_VOLUME_CAPACITY_BYTES
 
 
+def volume_usage_bytes(connection: Any) -> dict[str, Any]:
+    """What is actually on the volume, not just what is in this database.
+
+    `pg_database_size(current_database())` is the obvious measurement and the
+    wrong one. It excludes every other database in the cluster and all of
+    `pg_wal` -- and `pg_wal` is what actually ran the volume out of space on
+    2026-09-01: the PANIC names `pg_wal/xlogtemp.16755`. Measured on an idle
+    development cluster, the current database was 13 MB of the 191 MB the
+    volume was really holding, and WAL alone was 134 MB of it. An alarm reading
+    only the first number would have reported 0.3% of a 5 GB ceiling while the
+    volume was already 4% gone, and would have stayed quiet through the outage
+    it exists to prevent.
+
+    WAL is read through `pg_ls_waldir()`, which needs superuser or `pg_monitor`.
+    Where that is refused the probe degrades to the cluster total and says so in
+    `wal_measured`, rather than failing the status build outright.
+    """
+
+    row = connection.execute(
+        """
+        SELECT pg_database_size(current_database()) AS database_bytes,
+               (SELECT COALESCE(sum(pg_database_size(datname)), 0)::bigint
+                  FROM pg_database) AS cluster_bytes
+        """
+    ).fetchone()
+    database_bytes = int(row["database_bytes"] or 0)
+    cluster_bytes = int(row["cluster_bytes"] or 0)
+
+    # A savepoint, because a permission failure would otherwise poison the
+    # surrounding transaction and take the whole status build down with it.
+    wal_bytes = 0
+    wal_measured = False
+    try:
+        connection.execute("SAVEPOINT hawknetic_wal_probe")
+        wal_row = connection.execute(
+            "SELECT COALESCE(sum(size), 0)::bigint AS bytes FROM pg_ls_waldir()"
+        ).fetchone()
+        wal_bytes = int(wal_row["bytes"] or 0)
+        wal_measured = True
+        connection.execute("RELEASE SAVEPOINT hawknetic_wal_probe")
+    except Exception:
+        connection.execute("ROLLBACK TO SAVEPOINT hawknetic_wal_probe")
+
+    return {
+        "database_bytes": database_bytes,
+        "cluster_bytes": cluster_bytes,
+        "wal_bytes": wal_bytes,
+        "wal_measured": wal_measured,
+        "volume_bytes": cluster_bytes + wal_bytes,
+    }
+
+
 def database_capacity_state(
-    database_bytes: int,
+    volume_bytes: int,
     *,
     capacity_bytes: int | None = None,
 ) -> dict[str, Any]:
-    """How close the database is to filling its volume, and whether to shout.
+    """How close the volume is to full, and whether to shout.
 
-    Retention already reported `database_bytes` every cycle, and the number rose
-    steadily to the volume ceiling without anything ever escalating it. On
-    2026-09-01 PostgreSQL ran out of space mid-write, PANICked, and then could
-    not finish WAL recovery to restart -- a full volume is unrecoverable in
-    place, so the only useful alarm is one that fires while there is still room
-    to act. Warning at 75% and critical at 90% leaves roughly four and two days
-    of headroom respectively at the growth rate production measured.
+    Pass the number from `volume_usage_bytes()["volume_bytes"]` -- everything on
+    the volume, not `pg_database_size` of one database. Retention already
+    reported a byte count every cycle and the number rose steadily to the
+    ceiling without anything ever escalating it. On 2026-09-01 PostgreSQL ran
+    out of space mid-write, PANICked, and then could not finish WAL recovery to
+    restart -- a full volume is unrecoverable in place, so the only useful alarm
+    is one that fires while there is still room to act. Warning at 75% and
+    critical at 90% leaves roughly four and two days of headroom respectively at
+    the growth rate production measured.
     """
 
     capacity = capacity_bytes if capacity_bytes and capacity_bytes > 0 else volume_capacity_bytes()
-    used = max(0, int(database_bytes))
+    used = max(0, int(volume_bytes))
     ratio = used / capacity if capacity else 0.0
     if ratio >= CAPACITY_CRITICAL_RATIO:
         state = "critical"
@@ -406,7 +460,7 @@ def database_capacity_state(
     else:
         state = "ok"
     return {
-        "database_bytes": used,
+        "volume_bytes": used,
         "capacity_bytes": capacity,
         "headroom_bytes": max(0, capacity - used),
         "used_ratio": round(ratio, 4),
@@ -428,9 +482,7 @@ def database_storage_census(
     configured = ensure_database_ready(settings)
     bounded_limit = max(1, min(int(limit), 100))
     with connection_pool(configured).connection() as connection:
-        total = connection.execute(
-            "SELECT pg_database_size(current_database()) AS bytes"
-        ).fetchone()
+        usage = volume_usage_bytes(connection)
         relations = connection.execute(
             """
             SELECT n.nspname AS schema_name,
@@ -450,7 +502,14 @@ def database_storage_census(
             (bounded_limit,),
         ).fetchall()
     return {
-        "database_bytes": int(total["bytes"] or 0),
+        "database_bytes": usage["database_bytes"],
+        # The volume is what has a ceiling, so it is what the alarm compares
+        # against. `database_bytes` stays for the relation breakdown below,
+        # which is scoped to this database by definition.
+        "cluster_bytes": usage["cluster_bytes"],
+        "wal_bytes": usage["wal_bytes"],
+        "wal_measured": usage["wal_measured"],
+        "volume_bytes": usage["volume_bytes"],
         "largest_relations": [
             {
                 "relation": f"{row['schema_name']}.{row['table_name']}",

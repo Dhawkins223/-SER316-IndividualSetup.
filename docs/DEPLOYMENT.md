@@ -92,10 +92,18 @@ fresh data. CI asserts exactly this shape.
 
 `/internal/status.json` carries a `storage` block and raises a
 `database_capacity` anomaly at 75% of `DATABASE_VOLUME_CAPACITY_BYTES`
-(warning) and 90% (critical). This exists because the database filled its volume
-to 100% while reporting its own size every hour and nothing ever compared that
+(warning) and 90% (critical). A critical anomaly also drops the top-level
+status to `degraded`. This exists because the database filled its volume to
+100% while reporting its own size every hour and nothing ever compared that
 number to the ceiling. Treat a critical capacity anomaly as an outage in
 progress: a full volume stops PostgreSQL and then blocks its own recovery.
+
+The measurement covers the **volume** — every database in the cluster plus
+`pg_ls_waldir()` — not `pg_database_size()` of one database, because WAL is
+what filled it. The block reports `cluster_bytes` and `wal_bytes` separately, so
+a rising ratio says whether to prune rows or to look at WAL recycling. Reading
+WAL needs superuser or `pg_monitor`; without it `wal_measured` is `false` and
+the figure is a floor rather than the truth.
 
 ## Configuration precedence, and the drift to be aware of
 

@@ -201,14 +201,32 @@ that number climbed to the ceiling. Nothing compared it to anything.
 raises a `database_capacity` anomaly, and `actionable_monitoring_events()`
 escalates it:
 
-| Used | State | Severity | Headroom at ~250 MB/day |
-| ---: | --- | --- | --- |
-| < 75% | ok | — | — |
-| ≥ 75% | warning | warning | ~5 days |
-| ≥ 90% | critical | **critical** | ~2 days |
+| Used | State | Severity | Readiness | Headroom at ~250 MB/day |
+| ---: | --- | --- | --- | --- |
+| < 75% | ok | — | ready | — |
+| ≥ 75% | warning | warning | ready | ~5 days |
+| ≥ 90% | critical | **critical** | **degraded** | ~2 days |
 
 The ceiling comes from `DATABASE_VOLUME_CAPACITY_BYTES`, defaulting to 5 GB.
 Raise it after a volume resize.
+
+**It measures the volume, not the database.** `pg_database_size()` was the
+obvious query and the wrong one: it excludes every other database in the
+cluster and all of `pg_wal` — and `pg_wal` is what actually ran the volume out
+of space, as the PANIC's `pg_wal/xlogtemp.16755` says outright. Measured on an
+idle development cluster, the current database was **13 MB of the 191 MB the
+volume was really holding**, with WAL alone at 134 MB. An alarm reading only
+the first number would have reported 0.3% of a 5 GB ceiling while the volume
+was already 4% gone, and would have stayed quiet straight through the outage it
+exists to prevent.
+
+`volume_usage_bytes()` therefore sums every database in the cluster plus
+`pg_ls_waldir()`, and reports `cluster_bytes` and `wal_bytes` separately —
+"prune the database" and "WAL is not being recycled" are different problems with
+different fixes, and a single ratio does not say which. Reading WAL needs
+superuser or `pg_monitor`; where that is refused the probe degrades to the
+cluster total and sets `wal_measured: false` rather than failing the status
+build.
 
 ## Local development: Docker optional
 

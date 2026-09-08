@@ -55,7 +55,12 @@ esac
 db_mode="${HAWKNETIC_LOCAL_DB:-auto}"
 case "$db_mode" in
   auto)
-    if command -v docker >/dev/null 2>&1; then db_mode="compose"; else db_mode="external"; fi
+    # `docker compose version` rather than `command -v docker`: the binary
+    # existing proves nothing useful. Docker without the Compose plugin, or with
+    # no reachable daemon, would be selected by a which-style check and then
+    # fail on the first `docker compose` call -- which is worse than falling
+    # back, because the fallback works.
+    if docker compose version >/dev/null 2>&1; then db_mode="compose"; else db_mode="external"; fi
     ;;
   compose)
     if ! command -v docker >/dev/null 2>&1; then
@@ -110,15 +115,32 @@ else
   python_bin="python3"
 fi
 
+# A password is not a URL component until it is escaped. `p@ss/word` splices a
+# new host and path into the connection string and either fails to parse or,
+# worse, parses as something else entirely. Byte-wise under LC_ALL=C so that
+# multi-byte characters encode per byte, which is what percent-encoding means.
+uri_encode() {
+  local raw="$1" out="" index char
+  local LC_ALL=C
+  for (( index = 0; index < ${#raw}; index++ )); do
+    char="${raw:index:1}"
+    case "$char" in
+      [A-Za-z0-9._~-]) out+="$char" ;;
+      *) printf -v char '%%%02X' "'$char"; out+="$char" ;;
+    esac
+  done
+  printf '%s' "$out"
+}
+
 database_url() {
   local database_name="$1"
-  if [[ -z "$postgres_password" ]]; then
-    printf 'postgresql://%s@%s:%s/%s' \
-      "$postgres_user" "$postgres_host" "$postgres_port" "$database_name"
-  else
-    printf 'postgresql://%s:%s@%s:%s/%s' \
-      "$postgres_user" "$postgres_password" "$postgres_host" "$postgres_port" "$database_name"
+  local user_part
+  user_part="$(uri_encode "$postgres_user")"
+  if [[ -n "$postgres_password" ]]; then
+    user_part="${user_part}:$(uri_encode "$postgres_password")"
   fi
+  printf 'postgresql://%s@%s:%s/%s' \
+    "$user_part" "$postgres_host" "$postgres_port" "$(uri_encode "$database_name")"
 }
 
 run_app() {
@@ -146,6 +168,7 @@ import sys
 import time
 
 import psycopg
+from psycopg import sql
 
 url = os.environ["DATABASE_BOOTSTRAP_URL"]
 names = [name for name in os.environ["DATABASE_BOOTSTRAP_NAMES"].split(",") if name]
@@ -160,7 +183,11 @@ for _ in range(attempts):
                     "SELECT 1 FROM pg_database WHERE datname = %s", (name,)
                 ).fetchone()
                 if not exists:
-                    connection.execute(f'CREATE DATABASE "{name}"')
+                    # Identifier(), not an f-string: a database name is
+                    # configuration, and configuration is not trusted syntax.
+                    connection.execute(
+                        sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name))
+                    )
         sys.exit(0)
     except Exception as exc:  # noqa: BLE001 - report whatever kept us out
         last_error = exc
@@ -282,18 +309,36 @@ case "$command_name" in
     if [[ "$db_mode" == "compose" ]]; then
       "${compose[@]}" down -v
     else
+      # Dropping databases on a server this script did not start is a much
+      # larger blast radius than deleting a Compose volume, and POSTGRES_HOST
+      # is one typo away from a server that matters. Loopback is the only
+      # target that is self-evidently a development database; anything else
+      # has to be claimed explicitly.
+      case "$postgres_host" in
+        127.0.0.1|localhost|::1|"") ;;
+        *)
+          if [[ "${HAWKNETIC_ALLOW_EXTERNAL_RESET:-}" != "1" ]]; then
+            echo "Refusing to drop databases on non-local host '$postgres_host'." >&2
+            echo "This would DROP \"$app_database\" and \"$test_database\" there. If that is really a development server, re-run with HAWKNETIC_ALLOW_EXTERNAL_RESET=1." >&2
+            exit 2
+          fi
+          ;;
+      esac
       DATABASE_RESET_URL="$(database_url postgres)" \
       DATABASE_RESET_NAMES="$app_database,$test_database" \
       "$python_bin" - <<'PY'
 import os
 
 import psycopg
+from psycopg import sql
 
 url = os.environ["DATABASE_RESET_URL"]
 names = [name for name in os.environ["DATABASE_RESET_NAMES"].split(",") if name]
 with psycopg.connect(url, connect_timeout=5, autocommit=True) as connection:
     for name in names:
-        connection.execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
+        connection.execute(
+            sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(name))
+        )
 PY
     fi
     db_start

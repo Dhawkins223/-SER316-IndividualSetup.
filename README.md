@@ -58,8 +58,10 @@ required. `HAWKNETIC_LOCAL_DB` selects where PostgreSQL comes from:
 | `external` | Use a PostgreSQL that is already running |
 
 In `external` mode the workflow creates its two databases but never starts or
-stops the server. Point it with `POSTGRES_HOST`, `POSTGRES_PORT`,
-`POSTGRES_USER` and `POSTGRES_PASSWORD` (or `.env`):
+stops the server, and `db-reset` refuses to drop databases on a non-loopback
+host unless `HAWKNETIC_ALLOW_EXTERNAL_RESET=1` says so explicitly. Point it with
+`POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_USER` and `POSTGRES_PASSWORD` (or
+`.env`):
 
 ```bash
 HAWKNETIC_LOCAL_DB=external POSTGRES_PORT=54329 ./scripts/local.sh test

@@ -14,6 +14,7 @@ from kalshi_research_bot.retention import (
     TOMBSTONE_KEY,
     RetentionWindowTooShort,
     database_capacity_state,
+    database_storage_census,
     prune_source_payload_bodies,
     render_storage_report,
     source_payload_storage_report,
@@ -374,6 +375,52 @@ class RetentionTests(PostgresTestCase):
         self.assertIn("raw.source_payloads", names)
         sizes = [row["total_bytes"] for row in census["largest_relations"]]
         self.assertEqual(sizes, sorted(sizes, reverse=True), "largest relation must come first")
+
+    def test_the_census_measures_the_volume_not_just_this_database(self) -> None:
+        """WAL is what filled the volume, and it is not in `pg_database_size`.
+
+        The PANIC on 2026-09-01 named `pg_wal/xlogtemp`. An alarm reading only
+        the current database's size would have stayed quiet through it: on an
+        idle cluster WAL alone is an order of magnitude larger than the
+        database.
+        """
+
+        census = database_storage_census(settings=self.settings, limit=3)
+
+        self.assertGreater(census["database_bytes"], 0)
+        # Every database in the cluster, so never less than this one.
+        self.assertGreaterEqual(census["cluster_bytes"], census["database_bytes"])
+        self.assertEqual(census["volume_bytes"], census["cluster_bytes"] + census["wal_bytes"])
+        # The whole point: the number the alarm compares against is bigger than
+        # the number that was being reported before.
+        self.assertGreater(census["volume_bytes"], census["database_bytes"])
+        if census["wal_measured"]:
+            self.assertGreater(census["wal_bytes"], 0)
+
+    def test_a_full_volume_makes_the_status_degraded_rather_than_ready(self) -> None:
+        """A critical capacity anomaly that still reported "ready" would tell an
+        operator the opposite of what the alarm says."""
+
+        from kalshi_research_bot.monitoring import build_internal_status
+
+        # A one-byte ceiling puts any real cluster past the critical threshold.
+        with mock.patch.dict("os.environ", {"DATABASE_VOLUME_CAPACITY_BYTES": "1"}):
+            status = build_internal_status(self.settings)
+
+        self.assertEqual(status["status"], "degraded")
+        capacity = [a for a in status["anomalies"] if a["type"] == "database_capacity"]
+        self.assertEqual(len(capacity), 1)
+        self.assertEqual(capacity[0]["state"], "critical")
+        self.assertEqual(status["storage"]["state"], "critical")
+
+        # And a roomy ceiling is not an alarm, so the gate is the ratio rather
+        # than the presence of the check.
+        with mock.patch.dict("os.environ", {"DATABASE_VOLUME_CAPACITY_BYTES": "1000000000000"}):
+            healthy = build_internal_status(self.settings)
+        self.assertFalse(
+            [a for a in healthy["anomalies"] if a["type"] == "database_capacity"]
+        )
+        self.assertEqual(healthy["storage"]["state"], "ok")
 
     def test_retention_worker_reports_where_the_space_is(self) -> None:
         from kalshi_research_bot.worker_services import build_service_operation

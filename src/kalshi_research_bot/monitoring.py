@@ -13,7 +13,7 @@ from .database import (
     connection_pool,
     database_startup_status,
 )
-from .retention import database_capacity_state
+from .retention import database_capacity_state, volume_usage_bytes
 
 
 def utc_now_iso() -> str:
@@ -298,11 +298,10 @@ def build_internal_status(
             settlement_delays = _settlement_delays(connection, now_iso=checked_at.isoformat())
             # Cheap enough to read every status build, and the one number that
             # predicts the outage that actually happened: a volume at 100% takes
-            # PostgreSQL down in a way a restart cannot fix.
-            size_row = connection.execute(
-                "SELECT pg_database_size(current_database()) AS bytes"
-            ).fetchone()
-            capacity = database_capacity_state(int(size_row["bytes"] or 0))
+            # PostgreSQL down in a way a restart cannot fix. Everything on the
+            # volume, not this database alone -- WAL is what filled it.
+            usage = volume_usage_bytes(connection)
+            capacity = {**database_capacity_state(usage["volume_bytes"]), **usage}
             latest_models = [
                 dict(row)
                 for row in connection.execute(
@@ -388,15 +387,27 @@ def build_internal_status(
                 "type": "database_capacity",
                 "state": capacity["state"],
                 "used_ratio": capacity["used_ratio"],
-                "database_bytes": capacity["database_bytes"],
+                "volume_bytes": capacity["volume_bytes"],
                 "capacity_bytes": capacity["capacity_bytes"],
                 "headroom_bytes": capacity["headroom_bytes"],
+                # Named separately because "prune the database" and "WAL is not
+                # being archived or recycled" are different problems with
+                # different fixes, and the ratio alone does not say which.
+                "cluster_bytes": capacity["cluster_bytes"],
+                "wal_bytes": capacity["wal_bytes"],
+                "wal_measured": capacity["wal_measured"],
             }
         )
     connector_status = build_connectors_status()
+    # A volume at or past the critical threshold is roughly two days from
+    # stopping PostgreSQL in a way no restart recovers, so reporting "ready"
+    # through it would understate the one condition this status view exists to
+    # catch. The warning threshold deliberately does not block: there is still
+    # a working system and time to prune.
+    blocking = {"stale_worker_heartbeat", "consecutive_worker_failures", "pending_migrations"}
     ready = database["available"] and not any(
-        anomaly["type"]
-        in {"stale_worker_heartbeat", "consecutive_worker_failures", "pending_migrations"}
+        anomaly["type"] in blocking
+        or (anomaly["type"] == "database_capacity" and anomaly.get("state") == "critical")
         for anomaly in anomalies
     )
     return {

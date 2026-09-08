@@ -317,12 +317,16 @@ def _retention_operation() -> Callable[[], Mapping[str, Any]]:
         # Report where the space is, not just what was pruned. A pass that frees
         # nothing while the volume keeps growing is only explicable with a census.
         census = database_storage_census(limit=6)
-        capacity = database_capacity_state(census["database_bytes"])
+        capacity = database_capacity_state(census["volume_bytes"])
         return {
             "records_processed": pruned,
             "database_bytes": census["database_bytes"],
             # The ratio, not just the byte count: "3.9 GB" needs a ceiling to
             # mean anything, and this worker is the one watching the volume.
+            # Measured across the volume, not this database: WAL is what filled
+            # it, and pruning rows does not touch WAL.
+            "volume_bytes": census["volume_bytes"],
+            "wal_bytes": census["wal_bytes"],
             "volume_capacity_bytes": capacity["capacity_bytes"],
             "volume_used_ratio": capacity["used_ratio"],
             "volume_state": capacity["state"],
