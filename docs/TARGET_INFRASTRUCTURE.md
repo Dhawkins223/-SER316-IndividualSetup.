@@ -250,9 +250,11 @@ audit cannot do them and because two of them destroy data.
 
 1. **Recover the production database.** It cannot restart on a full volume.
    Check the service's Backups tab first, but check the dates: the database grew
-   monotonically, so only a snapshot from July or earlier has real headroom — a
-   later one restores a near-full dataset that re-fills within days. Failing
-   that, the volume has to grow,
+   monotonically, so a snapshot's usefulness is a function of its date: the
+   volume held 778 MB on 2026-07-25 and ~5 GB at the PANIC, about 111 MB/day, so
+   a weekly snapshot from mid-August is around 2.8 GB and still workable while a
+   September one is not. `docs/ROLLBACK.md` has the table. Failing that, the
+   volume has to grow,
    which Railway's published limits put on the Pro plan. `docs/ROLLBACK.md` has
    the ordered runbook and the reason each step comes where it does.
 2. **Delete the two obsolete staging databases** — after taking a backup. They

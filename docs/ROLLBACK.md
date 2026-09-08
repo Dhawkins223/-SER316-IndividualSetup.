@@ -39,26 +39,40 @@ volume is still there if it turns out to be wrong.
 **A backup only helps if it is old enough.** The volume filled because retention
 never bit, so the database grew monotonically — which means a snapshot from
 shortly before the PANIC contains a near-full dataset and restores onto a fresh
-5 GB volume with no headroom at all. It would come up, keep collecting at
-~250 MB/day, and PANIC again within days.
+5 GB volume with almost no headroom. It would come up, keep collecting at the
+recent rate of 230-280 MB/day, and PANIC again within days.
 
-Work out which backups are actually useful from the growth rate:
+Work out which backups are useful from the fill rate this volume actually
+showed. Two measured points bracket it: **778 MB on 2026-07-25**
+(`docs/railway-volume-storage-audit.md`) and **~5 GB at the PANIC on
+2026-09-01** — 38 days, so **~111 MB/day** on average.
 
-| Snapshot date | Approximate size | Useful? |
+| Snapshot date | Approximate size | Headroom on 5 GB |
 | --- | ---: | --- |
-| 2026-07-25 (measured, `docs/railway-volume-storage-audit.md`) | 778 MB | yes — real headroom |
-| ~2026-08-11 (extrapolated at ~250 MB/day) | ~5 GB | no — already at the ceiling |
-| Anything after mid-August | full | no |
+| 2026-07-25 (measured) | 0.8 GB | ~4.2 GB — ample |
+| ~2026-08-08 | ~2.3 GB | ~2.7 GB — comfortable |
+| ~2026-08-12 | ~2.8 GB | ~2.2 GB — workable |
+| ~2026-08-18 | ~3.4 GB | ~1.6 GB — tight, prune at once |
+| ~2026-08-25 | ~4.2 GB | ~0.8 GB — marginal |
+| 2026-09-01 (PANIC) | ~5.0 GB | none |
 
-Railway's retention makes this narrower still: daily backups are kept 6 days and
-weekly 27, so by now both only cover the period when the volume was already full.
-**Only a monthly snapshot from June or July is likely to help**, and only if a
-monthly schedule was enabled back then.
+Against Railway's retention — daily kept 6 days, weekly 27, monthly 89 — that
+puts a **weekly** snapshot around 2026-08-12 at roughly 2.8 GB, which is usable.
+Daily snapshots only reach back to 2026-09-02 and are all post-fill.
 
-So: if there is a snapshot from July or earlier, restore it, then go straight to
-step 4 below and prune before the backlog rebuilds. If the only snapshots are
-from August or September — or the tab is empty because backups were never
-scheduled — restoring buys nothing and the resize path is the only way through.
+Note that ~111 MB/day is the *average* over that span and the rate was not
+constant: `docs/raw-payload-retention.md` measured 230-280 MB/day around
+2026-08-17, after the sports collector added its ~59 MB/day. So growth
+accelerated, early snapshots are likely smaller than the table says, and late
+ones larger. **Treat the table as a guide to which snapshot to try, not as the
+answer.** After restoring, read the volume's actual usage in the Railway metrics
+before deciding whether you still need the resize.
+
+So: restore the oldest snapshot that still contains data you can live with,
+check its real size, then go to step 4 and prune before the backlog rebuilds. If
+every snapshot is from September — or the tab is empty because backups were
+never scheduled — restoring buys nothing and the resize path is the only way
+through.
 
 Either way, turn on a **Daily** schedule once the database is healthy again.
 
