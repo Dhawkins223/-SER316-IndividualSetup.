@@ -13,6 +13,7 @@ dependencies = [
 # unchanged. Pinned exactly: an unpinned linter turns someone else's release
 # into a red build on a pull request that did not touch the code it flags.
 dev = ["ruff==0.15.8"]
+browser = ["playwright==1.62.0"]
 
 # Only `scripts/optimize_dashboard_fonts.py` needs these, and only when the
 # shipped woff2 files are rebuilt. Serving the dashboard does not, so they stay

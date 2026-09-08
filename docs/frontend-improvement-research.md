@@ -297,3 +297,10 @@ The offline render + screenshot harness used for this review (fixture payload
 builder, page renderer, Playwright screenshot script) was session-local and is
 described in "Method"; the fixture-construction logic worth keeping is exactly
 what the P2 `browser_fixtures.py` helper should absorb.
+
+## Reader readability update
+
+The dashboard label floor is now 11px, including narrow-screen status badges.
+Reader navigation uses Review, and its summary retains contracts checked and
+review tiers ready; operational counts remain on the operator page. Fragility
+labels state what the badge describes and expose the inputs below the figures.

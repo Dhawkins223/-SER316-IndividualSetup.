@@ -594,6 +594,67 @@ class ReaderResearchFramingTests(unittest.TestCase):
             with self.subTest(phrase=phrase):
                 self.assertNotRegex(phrase, self.WAGERING)
 
+    def test_reader_navigation_describes_review_in_all_states(self) -> None:
+        for state in ("live", "empty", "stale", "error", "loading"):
+            with self.subTest(state=state):
+                rendered = self.page("read_only", state)
+                self.assertNotRegex(self.visible_text(rendered), re.compile(r"\bbuilder\b", re.I))
+                self.assertIn('aria-label="Review views"', rendered)
+                self.assertIn('href="#prediction-drawer"', rendered)
+
+    def test_summary_matches_the_viewers_responsibility(self) -> None:
+        for role, count in (("read_only", 2), ("admin", 4)):
+            rendered = self.page(role)
+            hero = rendered.split('id="builder"', 1)[1].split('</section>', 1)[0]
+            self.assertEqual(len(re.findall(r'class="stat-card\b', hero)), count)
+            self.assertIn("Contracts checked", hero)
+
+    def test_compact_views_use_the_card_estimate_without_recalculating(self) -> None:
+        for role in ("read_only", "admin"):
+            with self.subTest(role=role):
+                rendered = self.page(role)
+                drawer = rendered.split('id="prediction-drawer"', 1)[1].split('</aside>', 1)[0]
+                card = rendered.split('id="primary"', 1)[1].split('</section>', 1)[0]
+                pattern = r'<small>Estimated to hit</small><strong>([^<]+)</strong>'
+                estimate = re.search(pattern, card).group(1)
+                self.assertEqual(re.search(pattern, drawer).group(1), estimate)
+                self.assertIn(f'<small>Estimated to hit {estimate}</small>', rendered)
+                self.assertIn("Market implied:", drawer)
+
+    def test_compact_views_withhold_an_estimate_for_only_some_legs(self) -> None:
+        from kalshi_research_bot.paper_server import slip_estimate_display
+
+        report = {
+            "analysis_available": True,
+            "skipped_legs": [{"leg_id": "missing", "reason": "no_quoted_ask"}],
+            "analysis": {"hit_probability": .8},
+        }
+        self.assertEqual(slip_estimate_display(report), ("Unavailable", ""))
+
+    def test_fragility_badges_explain_their_basis(self) -> None:
+        from kalshi_research_bot.paper_server import render_slip_analysis
+        from kalshi_research_bot.slip_report import build_slip_analysis
+
+        report = build_slip_analysis(make_verified_fixture_payload(), "primary")
+        for tier, label in (("low", "Few moving parts"), ("moderate", "Some fragility"), ("high", "Fragile"), ("very_high", "Very fragile")):
+            report["analysis"]["risk_tier"] = tier
+            rendered = render_slip_analysis(report)
+            self.assertIn(f">{label}</span>", rendered)
+            self.assertNotRegex(rendered, r'>[^<]* risk</span>')
+            self.assertIn("leg count, correlation, and estimated hit probability", rendered)
+
+    def test_compact_estimate_omits_malformed_intervals(self) -> None:
+        from kalshi_research_bot.paper_server import slip_estimate_display
+
+        for interval in (None, [], [0.2], [0.2, 0.3, 0.4], "bad", {0: 0.2, 1: 0.3},
+                         [float("nan"), 0.9], [0.1, float("inf")], [10 ** 400, 0.9],
+                         ["bad", 0.9], [-0.1, 0.9], [0.2, 1.1], [0.9, 0.1]):
+            with self.subTest(interval=interval):
+                report = {"analysis_available": True, "analysis": {
+                    "hit_probability": 0.8, "hit_probability_interval": interval,
+                }}
+                self.assertEqual(slip_estimate_display(report), ("80.00%", ""))
+
     def test_dollar_figures_are_an_operator_view(self) -> None:
         reader = self.visible_text(self.page("read_only"))
         operator = self.visible_text(self.page("admin"))

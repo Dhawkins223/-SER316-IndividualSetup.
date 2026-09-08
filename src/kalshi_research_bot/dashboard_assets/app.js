@@ -390,6 +390,7 @@ function setMobileMenu(open) {
   if (!mobileMenuToggle || !appSidebar) return;
   appSidebar.classList.toggle("open", open);
   sidebarScrim?.classList.toggle("open", open);
+  if (sidebarScrim) sidebarScrim.hidden = !open;
   mobileMenuToggle.setAttribute("aria-expanded", String(open));
   // Without the scroll lock the page behind kept scrolling under the drawer,
   // which read as the content bleeding through it.
@@ -436,6 +437,104 @@ if (mobileMenuToggle && appSidebar) {
   window.matchMedia("(min-width: 1181px)").addEventListener("change", event => {
     if (event.matches) setMobileMenu(false);
   });
+}
+
+/* --------------------------------------------------- mobile current slip */
+
+const predictionDrawer = document.querySelector("#prediction-drawer");
+const predictionDrawerTitle = document.querySelector("#prediction-drawer-title");
+const mobileSlipToggle = document.querySelector("#mobile-slip-toggle");
+const closePredictionDrawer = document.querySelector("#close-prediction-drawer");
+const mobileSlipMedia = window.matchMedia("(max-width: 900px)");
+const slipBackground = [...document.querySelectorAll(
+  ".app-topbar, .app-sidebar, .workspace, .mobile-bottom-nav, #mobile-slip-toggle, .skip-link"
+)];
+let lastFocusedBeforeSlip = null;
+
+function setMobileSlip(open, restoreFocus = true) {
+  if (!predictionDrawer || !mobileSlipToggle) return;
+  const mobile = mobileSlipMedia.matches;
+  const expanded = mobile && open;
+  if (expanded && !document.body.classList.contains("slip-open")) {
+    setMobileMenu(false);
+    lastFocusedBeforeSlip = document.activeElement;
+  }
+  document.body.classList.toggle("slip-open", expanded);
+  predictionDrawer.hidden = mobile && !expanded;
+  mobileSlipToggle.setAttribute("aria-expanded", String(expanded));
+  predictionDrawer.toggleAttribute("aria-modal", expanded);
+  if (expanded) {
+    predictionDrawer.setAttribute("aria-modal", "true");
+    predictionDrawer.setAttribute("role", "dialog");
+  } else {
+    predictionDrawer.removeAttribute("role");
+  }
+  slipBackground.forEach(node => { node.inert = expanded; });
+  if (expanded) {
+    predictionDrawerTitle?.focus();
+  } else if (restoreFocus && lastFocusedBeforeSlip instanceof HTMLElement) {
+    const target = mobile ? lastFocusedBeforeSlip : predictionDrawerTitle;
+    target?.focus();
+    lastFocusedBeforeSlip = null;
+  }
+}
+
+if (predictionDrawer && mobileSlipToggle && closePredictionDrawer) {
+  function syncMobileSlip() {
+    const mobile = mobileSlipMedia.matches;
+    const drawerHadFocus = predictionDrawer.contains(document.activeElement);
+    document.body.classList.toggle("slip-enhanced", mobile);
+    mobileSlipToggle.hidden = !mobile;
+    closePredictionDrawer.hidden = !mobile;
+    setMobileSlip(false);
+    if (mobile && drawerHadFocus) mobileSlipToggle.focus();
+  }
+  syncMobileSlip();
+  mobileSlipMedia.addEventListener("change", syncMobileSlip);
+  mobileSlipToggle.addEventListener("click", () => setMobileSlip(true));
+  closePredictionDrawer.addEventListener("click", () => setMobileSlip(false));
+  document.querySelectorAll('a[href="#prediction-drawer"]').forEach(link => {
+    link.addEventListener("click", event => {
+      if (!mobileSlipMedia.matches) return;
+      event.preventDefault();
+      setMobileSlip(true);
+    });
+  });
+  predictionDrawer.querySelectorAll('a[href^="#"]').forEach(link => {
+    link.addEventListener("click", () => {
+      if (!mobileSlipMedia.matches) return;
+      setMobileSlip(false, false);
+      lastFocusedBeforeSlip = null;
+      const destination = document.querySelector(link.getAttribute("href"));
+      if (destination) {
+        destination.setAttribute("tabindex", "-1");
+        destination.focus();
+      }
+    });
+  });
+  document.addEventListener("keydown", event => {
+    if (!document.body.classList.contains("slip-open")) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      setMobileSlip(false);
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const focusable = [...predictionDrawer.querySelectorAll(FOCUSABLE)]
+      .filter(node => node.offsetParent !== null);
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && (document.activeElement === first || document.activeElement === predictionDrawerTitle)) {
+      event.preventDefault();
+      last?.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first?.focus();
+    }
+  });
+  if (window.location.hash === "#prediction-drawer" && mobileSlipMedia.matches) {
+    setMobileSlip(true);
+  }
 }
 
 liveDataPollTimer = setTimeout(pollLiveDataFreshness, LIVE_DATA_POLL_SECONDS * 1000);

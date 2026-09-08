@@ -1562,7 +1562,51 @@ def render_sports_selection(entry: dict, market_type: str = "") -> str:
     """
 
 
-def render_compact_slip(slip: dict, source_payload: dict, *, show_dollar_figures: bool = True) -> str:
+def slip_analysis_report(slip: dict, payload: dict, slip_key: str) -> dict:
+    """Use one bounded, failure-aware analysis path for every slip view."""
+    if slip_key not in SLIP_SOURCES:
+        return {"analysis_available": False, "detail": "Unknown review tier."}
+    try:
+        return build_slip_analysis(
+            {**payload, SLIP_SOURCES[slip_key][0]: slip},
+            slip_key,
+            stake=DEFAULT_SLIP_STAKE_DOLLARS,
+        )
+    except Exception as error:
+        return {"analysis_available": False, "detail": f"Slip arithmetic unavailable: {type(error).__name__}."}
+
+
+def slip_estimate_display(report: dict) -> tuple[str, str]:
+    """Format the same estimate and interval in the card, tile and drawer.
+
+    A partial analysis describes fewer legs than the listed slip. Compact
+    views cannot silently present it as a probability for the complete slip.
+    """
+    if not report.get("analysis_available") or report.get("skipped_legs"):
+        return "Unavailable", ""
+    analysis = report.get("analysis") or {}
+    value = finite_number(analysis.get("hit_probability"))
+    if value is None or not 0 <= value <= 1:
+        return "Unavailable", ""
+    interval = analysis.get("hit_probability_interval")
+    if isinstance(interval, (list, tuple)) and len(interval) == 2:
+        low, high = (finite_number(endpoint) for endpoint in interval)
+        interval = [low, high] if low is not None and high is not None and 0 <= low <= high <= 1 else None
+    else:
+        interval = None
+    decimals = significant_decimals(interval)
+    band = (
+        f'<small class="metric-range">95% CI '
+        f'{interval[0] * 100:.{decimals}f}-{interval[1] * 100:.{decimals}f}%</small>'
+        if interval else ""
+    )
+    return f"{value * 100:.{decimals}f}%", band
+
+
+def render_compact_slip(
+    slip: dict, source_payload: dict, *, show_dollar_figures: bool = True,
+    analysis_report: dict | None = None,
+) -> str:
     if slip.get("action") != "BUILD_SLIP":
         reason = str(slip.get("reason") or "No exact listed combo currently meets the review rules.")
         source_context = combo_source_context(source_payload, "primary")
@@ -1594,6 +1638,8 @@ def render_compact_slip(slip: dict, source_payload: dict, *, show_dollar_figures
     status_text = "Ready to review" if manual_ready else "Review required"
     status_class = "good" if manual_ready else "warning"
     combo_chance_text, combo_chance_range = combo_probability_display(slip)
+    report = analysis_report if analysis_report is not None else slip_analysis_report(slip, source_payload, "primary")
+    estimate_text, estimate_range = slip_estimate_display(report)
     # What $5 turns into is a wagering figure, and "payout" is a wagering word.
     # A reader's drawer says what the contract costs and what that price
     # implies; the return on a hypothetical stake stays on the operator's page.
@@ -1613,10 +1659,12 @@ def render_compact_slip(slip: dict, source_payload: dict, *, show_dollar_figures
       <p>Research only. Check every side, price, and start time against Kalshi before relying on it.</p>
     </div>
     <div class="drawer-metrics{'' if show_dollar_figures else ' is-two-up'}">
+      <span><small>Estimated to hit</small><strong>{estimate_text}</strong>{estimate_range}</span>
       <span><small>Price</small><strong>{money(slip.get("estimated_combo_price_cents"))}c</strong></span>
-      <span><small>Implied chance</small><strong>{combo_chance_text}</strong>{combo_chance_range}</span>
       {payout_cell}
     </div>
+    <p class="status-note">Market implied: {combo_chance_text}. Estimate uses leg prices and correlation assumptions; it is not a validated forecast.</p>
+    {combo_chance_range}
     <ul class="drawer-leg-list">{compact_legs}</ul>
     {f'<p class="drawer-more">+{hidden_leg_count} more listed legs in the full review</p>' if hidden_leg_count else ''}
     <button type="button" class="btn btn-primary copy" data-copy="{html.escape(review_text, quote=True)}">Copy Review Packet</button>
@@ -1787,6 +1835,11 @@ def render_dashboard(
     # points, and a reader gets exactly that. The dollar restatement stays on
     # the operator's page, where it is a working figure rather than a pitch.
     viewer_sees_dollar_figures = viewer_sees_operations
+    analysis_reports = {
+        key: slip_analysis_report(payload.get(field) or {}, payload, key)
+        for key, (field, _) in SLIP_SOURCES.items()
+        if key != "research_edge" or viewer_sees_operations
+    }
     source_data_panel = render_source_data_panel(
         source_data_preview or {},
         can_refresh=viewer_can_refresh,
@@ -1867,7 +1920,7 @@ def render_dashboard(
 
       <section class="panel" id="research-edge">
         <div class="section-head"><div><span class="section-label">Operations</span><h2>Research Scout Slip</h2></div><p>Research estimates remain clearly labeled</p></div>
-        {render_slip_section(research_edge_slip, "RESEARCH SCOUT SLIP", "research_edge", payload, show_dollar_figures=viewer_sees_dollar_figures)}
+        {render_slip_section(research_edge_slip, "RESEARCH SCOUT SLIP", "research_edge", payload, show_dollar_figures=viewer_sees_dollar_figures, analysis_report=analysis_reports.get("research_edge"))}
       </section>"""
         if viewer_sees_operations
         else ""
@@ -1877,14 +1930,14 @@ def render_dashboard(
     # two links would scroll nowhere. They are replaced by the tiers a reader
     # actually came for.
     mobile_navigation_html = (
-        f"""<a href="#builder">{icon("builder")}Builder</a>
-    <a href="#primary">{icon("slip")}Slips</a>
+        f"""<a href="#builder">{icon("builder")}Review</a>
+    <a href="#prediction-drawer">{icon("slip")}Slip</a>
     <a href="#record">{icon("record")}History</a>
     <a href="#quality">{icon("health")}Quality</a>"""
         if viewer_sees_operations
-        else f"""<a href="#builder">{icon("builder")}Builder</a>
+        else f"""<a href="#builder">{icon("builder")}Review</a>
     <a href="#market-browser">{icon("contracts")}Contracts</a>
-    <a href="#primary">{icon("slip")}Slips</a>
+    <a href="#prediction-drawer">{icon("slip")}Slip</a>
     <a href="#all-day">{icon("clock")}All-day</a>"""
     )
     operator_navigation_html = (
@@ -1911,6 +1964,23 @@ def render_dashboard(
         if viewer_sees_operations
         else ""
     )
+    summary_cards_html = (
+        f'<div class="stat-card"><small>Games loaded</small><strong>{len(games)}</strong></div>'
+        f'<div class="stat-card"><small>Combo contracts</small><strong>{len(markets)}</strong></div>'
+        if viewer_sees_operations else ""
+    )
+    summary_cards_html += (
+        f'<div class="stat-card"><small>Contracts checked</small><strong>{verified_contracts}</strong>'
+        '<span class="stat-foot">Confirmed live on Kalshi today</span></div>'
+        f'<div class="stat-card {"is-accent" if ready_tiers else "is-warning"}">'
+        f'<small>Review tiers ready</small><strong>{ready_tiers}/{tier_total}</strong></div>'
+    )
+    drawer_ready = slip_is_built(primary_slip)
+    drawer_summary = (
+        f'{int(primary_slip.get("leg_count") or 0)} listed legs · '
+        f'{money(primary_slip.get("estimated_combo_price_cents"))}c'
+        if drawer_ready else 'No verified primary slip'
+    )
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -1919,7 +1989,7 @@ def render_dashboard(
   {FAVICON_LINK}
   <meta name="theme-color" content="#080f14">
   {refresh_meta}
-  <title>Hawknetic Predictions · Research Builder</title>
+  <title>Hawknetic Predictions · Market Review</title>
   <link rel="stylesheet" href="{STYLESHEET.url}">
 </head>
 <body data-paper="{html.escape(payload_json, quote=True)}">
@@ -1928,7 +1998,7 @@ def render_dashboard(
     <button class="mobile-menu-toggle" id="mobile-menu-toggle" type="button" aria-controls="app-sidebar" aria-expanded="false"><span></span><span></span><span></span><span class="sr-only">Open navigation</span></button>
     {render_brand()}
     <nav class="top-navigation" aria-label="Primary navigation">
-      <a href="#builder">Builder</a>
+      <a href="#builder">Review</a>
       <a href="#market-browser">Contracts</a>{operator_navigation_html}
     </nav>
     <div class="topbar-actions">
@@ -1942,8 +2012,8 @@ def render_dashboard(
     <aside class="app-sidebar" id="app-sidebar">
       <div class="sidebar-section">
         <span class="sidebar-label">Workspace</span>
-        <nav class="side-navigation" aria-label="Builder views">
-          <a href="#builder">{icon("builder")}<span>Kalshi builder</span></a>
+        <nav class="side-navigation" aria-label="Review views">
+          <a href="#builder">{icon("builder")}<span>Kalshi review</span></a>
           <a href="#market-browser">{icon("contracts")}<span>Live contracts</span><b>{len(markets)}</b></a>
           <a href="#primary">{icon("slip")}<span>80c+ review</span><b>{int(primary_slip.get("leg_count") or 0)}</b></a>
           <a href="#leverage">{icon("slip")}<span>75c+ review</span><b>{int(leverage_slip.get("leg_count") or 0)}</b></a>
@@ -1966,7 +2036,7 @@ def render_dashboard(
       <section class="workspace-hero" id="builder">
         <div class="hero-top">
           <div>
-            <p class="eyebrow">Live Kalshi prediction builder</p>
+            <p class="eyebrow">Live Kalshi market review</p>
             <h1>Review Kalshi markets before the slip.</h1>
             <p class="hero-tagline">Fresh market data, manual review packets, no account automation.</p>
           </div>
@@ -1980,20 +2050,17 @@ def render_dashboard(
           <div><strong>{data_label}</strong><p>{html.escape(data_message if not data_is_ready else snapshot_source + ' is current.')}</p></div>
         </div>
         {refresh_error_html}
-        <div class="stat-grid" role="group" aria-label="Current builder summary">
-          <div class="stat-card"><small>Games loaded</small><strong>{len(games)}</strong></div>
-          <div class="stat-card"><small>Combo contracts</small><strong>{len(markets)}</strong></div>
-          <div class="stat-card"><small>Verified today</small><strong>{verified_contracts}</strong><span class="stat-foot">Confirmed live on Kalshi today</span></div>
-          <div class="stat-card {'is-accent' if ready_tiers else 'is-warning'}"><small>Review tiers ready</small><strong>{ready_tiers}/{tier_total}</strong></div>
+        <div class="stat-grid{'' if viewer_sees_operations else ' is-pair'}" role="group" aria-label="Current review summary">
+          {summary_cards_html}
         </div>
       </section>
 
       <section class="panel" id="map">
         <div class="section-head">
-          <div><span class="section-label">Builder status</span><h2>Today's review slips</h2></div>
+          <div><span class="section-label">Review status</span><h2>Today's review slips</h2></div>
           <p>Only contracts listed on Kalshi right now, at prices quoted just now.</p>
         </div>
-        {render_visual_section(payload, include_research_scout=viewer_sees_operations, show_dollar_figures=viewer_sees_dollar_figures)}
+        {render_visual_section(payload, include_research_scout=viewer_sees_operations, show_dollar_figures=viewer_sees_dollar_figures, analysis_reports=analysis_reports)}
       </section>
 
       <section class="panel" id="market-browser">
@@ -2006,27 +2073,28 @@ def render_dashboard(
 
       <section class="panel" id="primary">
         <div class="section-head"><div><span class="section-label">Primary review</span><h2>80c+ Market Tier</h2></div><p>Higher-price exact combo legs</p></div>
-        {render_slip_section(primary_slip, "80c+ MARKET TIER", "primary", payload, show_dollar_figures=viewer_sees_dollar_figures)}
+        {render_slip_section(primary_slip, "80c+ MARKET TIER", "primary", payload, show_dollar_figures=viewer_sees_dollar_figures, analysis_report=analysis_reports.get("primary"))}
       </section>
 
       <section class="panel" id="leverage">
         <div class="section-head"><div><span class="section-label">Expanded review</span><h2>75c+ Market Tier</h2></div><p>More variance; same evidence requirements</p></div>
-        {render_slip_section(leverage_slip, "75c+ MARKET TIER", "leverage", payload, show_dollar_figures=viewer_sees_dollar_figures)}
+        {render_slip_section(leverage_slip, "75c+ MARKET TIER", "leverage", payload, show_dollar_figures=viewer_sees_dollar_figures, analysis_report=analysis_reports.get("leverage"))}
       </section>
 
       <section class="panel" id="all-day">
         <div class="section-head"><div><span class="section-label">All-day review</span><h2>All-Day 75-85c Tier</h2></div><p>Verified compatible contracts only</p></div>
-        {render_slip_section(all_day_slip, "ALL-DAY 75-85c TIER", "all_day", payload, show_dollar_figures=viewer_sees_dollar_figures)}
+        {render_slip_section(all_day_slip, "ALL-DAY 75-85c TIER", "all_day", payload, show_dollar_figures=viewer_sees_dollar_figures, analysis_report=analysis_reports.get("all_day"))}
       </section>
       {operator_panels_html}
     </main>
 
-    <aside class="prediction-drawer" aria-label="Current prediction slip">
+    <aside class="prediction-drawer" id="prediction-drawer" aria-labelledby="prediction-drawer-title">
       <div class="drawer-header">
-        <div><span class="section-label">Current review</span><h2>Your prediction slip</h2></div>
+        <div><span class="section-label">Current review</span><h2 id="prediction-drawer-title" tabindex="-1">Your prediction slip</h2></div>
         <a href="#primary" aria-label="Open full primary slip">↗</a>
+        <button class="btn btn-tertiary btn-sm" id="close-prediction-drawer" type="button" hidden>Close slip</button>
       </div>
-      {render_compact_slip(primary_slip, payload, show_dollar_figures=viewer_sees_dollar_figures)}
+      {render_compact_slip(primary_slip, payload, show_dollar_figures=viewer_sees_dollar_figures, analysis_report=analysis_reports.get("primary"))}
       <div class="drawer-trust-card">
         <span aria-hidden="true">✓</span>
         <div><strong>Every leg is checked</strong><p>Each one shows its Kalshi ticker, its price, and when that price was quoted.</p></div>
@@ -2034,6 +2102,11 @@ def render_dashboard(
     </aside>
   </div>
 
+  <button class="mobile-slip-toggle" id="mobile-slip-toggle" type="button" aria-expanded="false" aria-controls="prediction-drawer" hidden>
+    <span class="badge {'good' if drawer_ready else 'warning'}">{'Review slip' if drawer_ready else 'Waiting'}</span>
+    <span>{html.escape(drawer_summary)}</span>
+    <span aria-hidden="true">↑</span>
+  </button>
   <nav class="mobile-bottom-nav" aria-label="Mobile navigation">
     {mobile_navigation_html}
   </nav>
@@ -2049,6 +2122,7 @@ def render_slip_section(
     source_payload: dict | None = None,
     *,
     show_dollar_figures: bool = True,
+    analysis_report: dict | None = None,
 ) -> str:
     """One tier's slip card.
 
@@ -2114,7 +2188,8 @@ def render_slip_section(
         review_text = review_packet.get("copy_blocks", {}).get("review_packet") or fallback_copy_text
         ticker_stack = review_packet.get("copy_blocks", {}).get("ticker_stack") or ""
         try:
-            analysis_report = build_slip_analysis(slip_payload, slip_key, stake=DEFAULT_SLIP_STAKE_DOLLARS)
+            if analysis_report is None:
+                analysis_report = build_slip_analysis(slip_payload, slip_key, stake=DEFAULT_SLIP_STAKE_DOLLARS)
             analysis_html = render_slip_analysis(analysis_report, show_dollar_figures=show_dollar_figures)
             # Set only once the block has rendered: a report that exists but
             # fails to render falls through to the unavailable block below,
@@ -2148,7 +2223,7 @@ def render_slip_section(
         if max_leg_probability is not None
         else f"{float(slip.get('min_leg_probability') or 0) * 100:.0f}%"
     )
-    combo_probability_label = "Research Estimate" if slip_key == "research_edge" else "Implied Combo"
+    combo_probability_label = "Research Estimate" if slip_key == "research_edge" else "Market implied"
     combo_chance_text, combo_chance_range = combo_probability_display(slip)
     payout_cell = (
         f'<span><small>Est. $5 Payout</small><strong>${money(slip.get("estimated_payout_if_right"))}</strong></span>'
@@ -2213,6 +2288,12 @@ _VERDICT_LABELS = {
 }
 
 _RISK_CLASS = {"low": "badge-neutral", "moderate": "badge-neutral", "high": "warning", "very_high": "warning"}
+_FRAGILITY_LABELS = {
+    "low": "Few moving parts",
+    "moderate": "Some fragility",
+    "high": "Fragile",
+    "very_high": "Very fragile",
+}
 
 
 def render_slip_analysis(report: dict, *, show_dollar_figures: bool = True) -> str:
@@ -2269,7 +2350,10 @@ def render_slip_analysis(report: dict, *, show_dollar_figures: bool = True) -> s
     # listed-contract strip beside this block shows the combo contract's own
     # price. They are different instruments and legitimately differ, but sitting
     # adjacent and unlabelled they read as the page contradicting itself.
-    notes = ["Break-even is computed from the individual leg prices; the listed combo contract can be priced above or below them."]
+    notes = [
+        "Break-even is computed from the individual leg prices; the listed combo contract can be priced above or below them.",
+        "Fragility reflects leg count, correlation, and estimated hit probability.",
+    ]
     skipped = report.get("skipped_legs") or []
     if skipped:
         reasons = ", ".join(f'{item["leg_id"]} ({item["reason"]})' for item in skipped)
@@ -2325,12 +2409,12 @@ def render_slip_analysis(report: dict, *, show_dollar_figures: bool = True) -> s
         <span class="section-kicker">Estimate vs. price</span>
         <div class="slip-analysis-badges">
           <span class="badge {verdict_class}">{html.escape(verdict_label)}</span>
-          <span class="badge {_RISK_CLASS.get(risk, "badge-neutral")}">{html.escape(risk.replace("_", " "))} risk</span>
+          <span class="badge {_RISK_CLASS.get(risk, "badge-neutral")}">{_FRAGILITY_LABELS.get(risk, "Fragility unknown")}</span>
         </div>
       </div>
       <div class="metric-strip">
-        <span><small>Needs to hit</small><strong>{break_even * 100:.2f}%</strong></span>
         <span><small>Estimated to hit</small><strong>{hit * 100:.{hit_decimals}f}%</strong>{hit_range}</span>
+        <span><small>Needs to hit</small><strong>{break_even * 100:.2f}%</strong></span>
         <span class="{'delta-up' if edge > 0 else 'delta-down'}"><small>Difference</small><strong>{probability_points(edge, hit_decimals)}</strong></span>
         {ev_cell}
       </div>
@@ -2469,7 +2553,8 @@ def render_slip_leg(leg: dict) -> str:
 
 
 def render_visual_section(
-    payload: dict, *, include_research_scout: bool = True, show_dollar_figures: bool = True
+    payload: dict, *, include_research_scout: bool = True, show_dollar_figures: bool = True,
+    analysis_reports: dict | None = None,
 ) -> str:
     """The tier summary, over the tiers the viewer can actually open.
 
@@ -2480,20 +2565,20 @@ def render_visual_section(
     literal, so gating a tier cannot leave the total behind again.
     """
     tiers = [
-        ("80c+ Market", "primary", payload.get("custom_slip") or {}, "market-implied"),
-        ("75c+ Market", "leverage", payload.get("leverage_slip") or {}, "market-implied"),
-        ("All-Day 75-85c", "all-day", payload.get("all_day_slip") or {}, "market-implied"),
+        ("80c+ Market", "primary", payload.get("custom_slip") or {}),
+        ("75c+ Market", "leverage", payload.get("leverage_slip") or {}),
+        ("All-Day 75-85c", "all_day", payload.get("all_day_slip") or {}),
     ]
     if include_research_scout:
         tiers.append(
-            ("Research Scout", "research", payload.get("research_edge_slip") or {}, "research estimate")
+            ("Research Scout", "research_edge", payload.get("research_edge_slip") or {})
         )
     cards = []
     built_count = 0
     total_legs = 0
     source_ready = (payload.get("public_data_gate") or {}).get("status") == "ready"
     source_context = combo_source_context(payload)
-    for name, tier_class, slip, probability_kind in tiers:
+    for name, slip_key, slip in tiers:
         is_built = slip_is_built(slip)
         if is_built:
             built_count += 1
@@ -2504,9 +2589,12 @@ def render_visual_section(
         # One line on a small tile, so the band does not fit -- but the figure
         # must not claim two decimals it has not got just because there is no
         # room to qualify it. The card beside this one carries the interval.
-        chance_text, _ = combo_probability_display(slip)
+        report = (analysis_reports or {}).get(slip_key)
+        if report is None:
+            report = slip_analysis_report(slip, payload, slip_key)
+        chance_text, _ = slip_estimate_display(report)
         subline = (
-            f"{chance_text} {probability_kind}"
+            f"Estimated to hit {chance_text}"
             if is_built
             else ("No qualifying legs" if source_ready else "Waiting for fresh data")
         )
