@@ -27,12 +27,18 @@ verify             Run non-destructive configuration, migration, test, and smoke
 research-status    Show worker, connector, and queued operator-message status.
 research-once      Run one research-only cycle for each core worker.
 
-PostgreSQL source (HAWKNETIC_LOCAL_DB):
-  auto      Use Compose when Docker is present, otherwise an external server (default).
-  compose   Require Docker and run PostgreSQL from compose.yml.
-  external  Use a PostgreSQL that is already running. Point it with POSTGRES_HOST,
-            POSTGRES_PORT, POSTGRES_USER, POSTGRES_PASSWORD (or .env). The script
-            creates its two databases but never starts or stops the server.
+Database backends
+-----------------
+By default this script runs PostgreSQL through Docker Compose. To develop with
+no Docker daemon at all -- a managed development database such as a Neon branch,
+or a PostgreSQL installed directly on the machine -- export both:
+
+  HAWKNETIC_DATABASE_URL       development database
+  HAWKNETIC_TEST_DATABASE_URL  isolated test database (destroyed by `test`)
+
+Compose is then never invoked and Docker is not required. The db-start, db-stop,
+db-status, db-reset, and logs commands manage the Compose service only, and
+report that there is nothing to manage in external mode.
 EOF
   exit 0
 fi
@@ -42,38 +48,68 @@ case "$command_name" in
   *) echo "Unknown local workflow command: $command_name" >&2; exit 2 ;;
 esac
 
-# Docker is one way to get a local PostgreSQL, not the only one. A Codespace
-# runs Docker-in-Docker and Compose is the documented default there, but the
-# same workflow has to run against a PostgreSQL that already exists -- a
-# Codespaces service container, a system package, or a managed development
-# database -- so that developing this project never requires a container
-# runtime on someone's laptop.
+# `tests/test_local_workflow.py` runs this script as a subprocess, and it
+# inherits the caller's environment. Before external database mode existed the
+# child always stopped at the Docker guard; with a database configured it would
+# instead run the suite again, and that child would run it again. The result is
+# a fork bomb, not a test failure. Refuse to re-enter rather than trusting every
+# caller to scrub the environment.
 #
-#   HAWKNETIC_LOCAL_DB=auto      use Compose when Docker is present (default)
-#   HAWKNETIC_LOCAL_DB=compose   require Compose, fail if Docker is missing
-#   HAWKNETIC_LOCAL_DB=external  use an already-running PostgreSQL
-db_mode="${HAWKNETIC_LOCAL_DB:-auto}"
-case "$db_mode" in
-  auto)
-    # `docker compose version` rather than `command -v docker`: the binary
-    # existing proves nothing useful. Docker without the Compose plugin, or with
-    # no reachable daemon, would be selected by a which-style check and then
-    # fail on the first `docker compose` call -- which is worse than falling
-    # back, because the fallback works.
-    if docker compose version >/dev/null 2>&1; then db_mode="compose"; else db_mode="external"; fi
-    ;;
-  compose)
-    if ! command -v docker >/dev/null 2>&1; then
-      echo "HAWKNETIC_LOCAL_DB=compose needs Docker. Install Docker, run this in the repository Codespace, or set HAWKNETIC_LOCAL_DB=external to use a PostgreSQL that is already running." >&2
-      exit 127
+# Only the three commands that invoke `unittest discover` are listed, because
+# only those load the test module that re-enters this script. `research-once`
+# runs worker cycles and never starts the suite, so guarding it would refuse a
+# legitimate nested call for no protective benefit.
+case "$command_name" in
+  test|test-integration|verify)
+    if [[ -n "${HAWKNETIC_LOCAL_SH_ACTIVE:-}" ]]; then
+      echo "Refusing to run '$command_name' from inside scripts/local.sh: this would recurse." >&2
+      exit 3
     fi
     ;;
-  external) ;;
-  *)
-    echo "Unknown HAWKNETIC_LOCAL_DB mode: $db_mode (expected auto, compose, or external)" >&2
-    exit 2
-    ;;
 esac
+export HAWKNETIC_LOCAL_SH_ACTIVE=1
+
+# Docker is a backend, not a prerequisite of the workflow. When an external
+# development database is configured the Compose service is never started, so
+# requiring a daemon here would block the very setup that removes the daemon.
+external_database_url="${HAWKNETIC_DATABASE_URL:-}"
+external_test_database_url="${HAWKNETIC_TEST_DATABASE_URL:-}"
+if [[ -n "$external_database_url" || -n "$external_test_database_url" ]]; then
+  database_mode="external"
+else
+  database_mode="compose"
+fi
+
+if [[ "$database_mode" == "external" ]]; then
+  if [[ -z "$external_database_url" || -z "$external_test_database_url" ]]; then
+    echo "External database mode needs both HAWKNETIC_DATABASE_URL and HAWKNETIC_TEST_DATABASE_URL." >&2
+    echo "The test suite writes to the test database; pointing it at the development database would destroy it." >&2
+    exit 2
+  fi
+  if [[ "$external_database_url" == "$external_test_database_url" ]]; then
+    echo "HAWKNETIC_DATABASE_URL and HAWKNETIC_TEST_DATABASE_URL must name different databases." >&2
+    exit 2
+  fi
+  # CLAUDE.md: never point a Codespace or a test process at Railway production.
+  # A typo that pastes a hosted connection string here would otherwise run the
+  # destructive test suite against it.
+  if [[ -z "${HAWKNETIC_ALLOW_HOSTED_DATABASE:-}" ]]; then
+    for candidate in "$external_database_url" "$external_test_database_url"; do
+      case "$candidate" in
+        *railway.internal*|*rlwy.net*|*.railway.app*|*render.com*)
+          echo "Refusing to use a hosted Railway/Render database for local development or tests." >&2
+          echo "Set HAWKNETIC_ALLOW_HOSTED_DATABASE=1 only for a database you are certain is disposable." >&2
+          exit 2
+          ;;
+      esac
+    done
+  fi
+elif ! command -v docker >/dev/null 2>&1; then
+  echo "Docker is required for the Compose-backed local PostgreSQL service." >&2
+  echo "Either start a Docker daemon, or set HAWKNETIC_DATABASE_URL and HAWKNETIC_TEST_DATABASE_URL" >&2
+  echo "to use a managed development database instead. See 'scripts/local.sh help'." >&2
+  exit 127
+fi
 
 local_env_value() {
   local key="$1"
@@ -98,12 +134,7 @@ app_database="${POSTGRES_DB:-$(local_env_value POSTGRES_DB hawknetic)}"
 test_database="${POSTGRES_TEST_DB:-$(local_env_value POSTGRES_TEST_DB hawknetic_test)}"
 dashboard_host="${DASHBOARD_HOST:-$(local_env_value DASHBOARD_HOST 127.0.0.1)}"
 dashboard_port="${PORT:-$(local_env_value PORT 8765)}"
-postgres_host="${POSTGRES_HOST:-$(local_env_value POSTGRES_HOST 127.0.0.1)}"
-# Compose always provisions a password-authenticated server, so an empty
-# password there is a misconfiguration worth catching early. An external server
-# may legitimately use trust or peer authentication, and demanding a password it
-# does not want is how a workflow ends up requiring Docker again.
-if [[ -z "$postgres_password" && "$db_mode" == "compose" ]]; then
+if [[ -z "$postgres_password" && "$database_mode" == "compose" ]]; then
   echo "POSTGRES_PASSWORD must be set in the untracked .env file." >&2
   exit 2
 fi
@@ -134,13 +165,16 @@ uri_encode() {
 
 database_url() {
   local database_name="$1"
-  local user_part
-  user_part="$(uri_encode "$postgres_user")"
-  if [[ -n "$postgres_password" ]]; then
-    user_part="${user_part}:$(uri_encode "$postgres_password")"
+  if [[ "$database_mode" == "external" ]]; then
+    if [[ "$database_name" == "$test_database" ]]; then
+      printf '%s' "$external_test_database_url"
+    else
+      printf '%s' "$external_database_url"
+    fi
+    return 0
   fi
-  printf 'postgresql://%s@%s:%s/%s' \
-    "$user_part" "$postgres_host" "$postgres_port" "$(uri_encode "$database_name")"
+  printf 'postgresql://%s:%s@127.0.0.1:%s/%s' \
+    "$postgres_user" "$postgres_password" "$postgres_port" "$database_name"
 }
 
 run_app() {
@@ -154,68 +188,124 @@ run_app() {
   "$@"
 }
 
-# Ask over the wire rather than through the container, so the same check works
-# for a Compose server and an external one. psycopg is already a dependency of
-# the package, which keeps this from requiring psql on the host.
-ensure_databases_ready() {
-  local attempts="$1"
-  DATABASE_BOOTSTRAP_URL="$(database_url postgres)" \
-  DATABASE_BOOTSTRAP_NAMES="$app_database,$test_database" \
-  DATABASE_BOOTSTRAP_ATTEMPTS="$attempts" \
-  "$python_bin" - <<'PY'
+external_database_ready() {
+  # No daemon and no Compose service to health-check: the only question worth
+  # asking a managed database is whether it answers. A Neon branch that is
+  # scaled to zero wakes up on this connection, so a slow first attempt is
+  # expected rather than a failure.
+  #
+  # This also settles identity, which the string comparison above cannot. Two
+  # URLs that differ only in credentials or connection options -- a different
+  # user, an added sslmode -- name the same database, and `test` would then
+  # migrate and truncate the development one. Ask each server what it actually
+  # is and refuse when both answers match.
+  local attempts=15
+  until HAWKNETIC_APP_URL="$(database_url "$app_database")" \
+        HAWKNETIC_TEST_URL="$(database_url "$test_database")" \
+        "$python_bin" <<'PY'
 import os
 import sys
-import time
 
 import psycopg
-from psycopg import sql
 
-url = os.environ["DATABASE_BOOTSTRAP_URL"]
-names = [name for name in os.environ["DATABASE_BOOTSTRAP_NAMES"].split(",") if name]
-attempts = max(1, int(os.environ["DATABASE_BOOTSTRAP_ATTEMPTS"]))
 
-last_error = None
-for _ in range(attempts):
-    try:
-        with psycopg.connect(url, connect_timeout=5, autocommit=True) as connection:
-            for name in names:
-                exists = connection.execute(
-                    "SELECT 1 FROM pg_database WHERE datname = %s", (name,)
-                ).fetchone()
-                if not exists:
-                    # Identifier(), not an f-string: a database name is
-                    # configuration, and configuration is not trusted syntax.
-                    connection.execute(
-                        sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name))
-                    )
-        sys.exit(0)
-    except Exception as exc:  # noqa: BLE001 - report whatever kept us out
-        last_error = exc
-        time.sleep(2)
+def identity(url):
+    """The database's name, and the cluster it lives in.
 
-print(f"Local PostgreSQL did not become reachable: {last_error}", file=sys.stderr)
-sys.exit(1)
+    Addresses are not identity. The same database reached over a unix socket
+    and over TCP reports inet_server_addr() as NULL and as 127.0.0.1, so
+    comparing addresses would call one database two, and the destructive test
+    suite would then run against the development database -- exactly the
+    accident this check exists to stop. The cluster's system_identifier is
+    stable across both.
+    """
+
+    with psycopg.connect(url, connect_timeout=10) as connection:
+        name = connection.execute("SELECT current_database()").fetchone()[0]
+        try:
+            cluster = connection.execute(
+                "SELECT system_identifier FROM pg_control_system()"
+            ).fetchone()[0]
+        except psycopg.Error:
+            # Restricted to superusers unless granted, so a managed provider
+            # may refuse it. Absence is handled conservatively below.
+            cluster = None
+        return name, cluster
+
+
+app_name, app_cluster = identity(os.environ["HAWKNETIC_APP_URL"])
+test_name, test_cluster = identity(os.environ["HAWKNETIC_TEST_URL"])
+
+if app_name != test_name:
+    # Different names cannot be one database, wherever they live.
+    raise SystemExit(0)
+
+if app_cluster is not None and test_cluster is not None and app_cluster != test_cluster:
+    # Same name, provably different clusters: two databases that happen to
+    # share a name. Allowed.
+    raise SystemExit(0)
+
+if app_cluster is None or test_cluster is None:
+    print(
+        f"Both URLs name a database called {app_name!r}, and this server would not "
+        "report its cluster identity, so they cannot be proven distinct. Give the "
+        "development and test databases different names.",
+        file=sys.stderr,
+    )
+    raise SystemExit(3)
+
+print(
+    "HAWKNETIC_DATABASE_URL and HAWKNETIC_TEST_DATABASE_URL resolve to the same "
+    f"database ({app_name!r} in cluster {app_cluster}). The test suite would "
+    "destroy your development data.",
+    file=sys.stderr,
+)
+raise SystemExit(3)
 PY
+  do
+    # An identity clash is a configuration error, not a database still waking
+    # up. Retrying it fifteen times would only delay the message.
+    if [[ $? -eq 3 ]]; then
+      return 1
+    fi
+    attempts=$((attempts - 1))
+    if [[ "$attempts" -le 0 ]]; then
+      echo "External PostgreSQL did not answer. Check HAWKNETIC_DATABASE_URL and HAWKNETIC_TEST_DATABASE_URL." >&2
+      return 1
+    fi
+    sleep 2
+  done
 }
 
 wait_for_database() {
-  if [[ "$db_mode" == "compose" ]]; then
-    ensure_databases_ready 30
-  else
-    # An external server is not ours to start, so a short wait is a health
-    # check rather than a boot delay, and its failure should say so.
-    if ! ensure_databases_ready 3; then
-      echo "Set POSTGRES_HOST/POSTGRES_PORT/POSTGRES_USER/POSTGRES_PASSWORD (or .env) to a PostgreSQL that is already running, or use HAWKNETIC_LOCAL_DB=compose to have Docker provide one." >&2
+  if [[ "$database_mode" == "external" ]]; then
+    external_database_ready
+    return $?
+  fi
+  local attempts=30
+  until "${compose[@]}" exec -T postgres pg_isready -U "$postgres_user" -d "$app_database" >/dev/null; do
+    attempts=$((attempts - 1))
+    if [[ "$attempts" -le 0 ]]; then
+      echo "Local PostgreSQL did not become healthy." >&2
       return 1
     fi
   fi
 }
 
 db_start() {
-  if [[ "$db_mode" == "compose" ]]; then
-    "${compose[@]}" up -d postgres
+  if [[ "$database_mode" == "external" ]]; then
+    wait_for_database
+    return $?
   fi
+  "${compose[@]}" up -d postgres
   wait_for_database
+}
+
+compose_only() {
+  if [[ "$database_mode" == "external" ]]; then
+    echo "Nothing to $1: this workflow is using an external database, not the Compose service."
+    exit 0
+  fi
 }
 
 migrate() {
@@ -275,36 +365,23 @@ case "$command_name" in
       --host "$dashboard_host" --port "$dashboard_port"
     ;;
   stop|db-stop)
-    if [[ "$db_mode" == "compose" ]]; then
-      "${compose[@]}" stop postgres
-    else
-      echo "PostgreSQL is externally managed (HAWKNETIC_LOCAL_DB=$db_mode); this workflow did not start it and will not stop it."
-    fi
+    compose_only "stop"
+    "${compose[@]}" stop postgres
     ;;
   logs)
-    if [[ "$db_mode" == "compose" ]]; then
-      "${compose[@]}" logs -f postgres
-    else
-      echo "PostgreSQL is externally managed (HAWKNETIC_LOCAL_DB=$db_mode); read its logs where it runs." >&2
-      exit 2
-    fi
+    compose_only "show logs for"
+    "${compose[@]}" logs -f postgres
     ;;
   db-start)
     db_start
     ;;
   db-status)
-    if [[ "$db_mode" == "compose" ]]; then
-      "${compose[@]}" ps
-    else
-      db_start
-      run_app "$app_database" "$python_bin" -m kalshi_research_bot.db_command status
-    fi
+    compose_only "report status for"
+    "${compose[@]}" ps
     ;;
   db-reset)
-    # Dropping two databases is the external equivalent of deleting the Compose
-    # volume: it discards exactly this project's local data and nothing else on
-    # a server that may be hosting more than this project.
-    read -r -p "Delete only the local PostgreSQL data? Type RESET to continue: " confirmation
+    compose_only "reset"
+    read -r -p "Delete only the local PostgreSQL volume? Type RESET to continue: " confirmation
     [[ "$confirmation" == "RESET" ]] || { echo "Local database reset cancelled."; exit 1; }
     if [[ "$db_mode" == "compose" ]]; then
       "${compose[@]}" down -v
@@ -362,7 +439,7 @@ PY
     run_app "$app_database" "$python_bin" -m kalshi_research_bot.db_command status
     ;;
   verify)
-    if [[ "$db_mode" == "compose" ]]; then
+    if [[ "$database_mode" == "compose" ]]; then
       "${compose[@]}" config >/dev/null
     fi
     migrate

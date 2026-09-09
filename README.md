@@ -42,46 +42,51 @@ Useful commands:
 `db-reset` destroys only this project's local database and requires the explicit
 `RESET` confirmation. It never contacts Railway.
 
+### Developing without Docker
+
+Compose is one backend, not a prerequisite. To work with no Docker daemon at all
+— a managed development database such as two Neon branches, or a PostgreSQL
+installed directly on the machine — set both URLs and Compose is never invoked:
+
+```bash
+export HAWKNETIC_DATABASE_URL='postgresql://.../dev'
+export HAWKNETIC_TEST_DATABASE_URL='postgresql://.../dev_test'
+./scripts/local.sh test
+```
+
+Both are required and must resolve to different databases: `test` writes to the
+test database, so sharing one would destroy development data. Comparing the URLs
+is not enough — two that differ only in credentials or connection options name
+the same database — so each server is asked for `current_database()` and its
+address before anything runs. A Railway or Render host is refused unless
+`HAWKNETIC_ALLOW_HOSTED_DATABASE` is set. Never point either at production.
+
+`compose.yml` is retained as the offline fallback and is what CI uses.
+
 See [Cloud development](docs/cloud-development.md) for setup, Secrets, ports,
 tests, database commands, the Railway configuration audit, staging proposal,
 logs, rollback, and the complete Windows/Docker Desktop retirement boundary.
 
-### Running without Docker
-
-Compose is the default and the Codespaces path is unchanged, but Docker is not
-required. `HAWKNETIC_LOCAL_DB` selects where PostgreSQL comes from:
-
-| Mode | Behaviour |
-| --- | --- |
-| `auto` (default) | Compose when Docker is present, an external server otherwise |
-| `compose` | Require Docker and run PostgreSQL from `compose.yml` |
-| `external` | Use a PostgreSQL that is already running |
-
-In `external` mode the workflow creates its two databases but never starts or
-stops the server, and `db-reset` refuses to drop databases on a non-loopback
-host unless `HAWKNETIC_ALLOW_EXTERNAL_RESET=1` says so explicitly. Point it with
-`POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_USER` and `POSTGRES_PASSWORD` (or
-`.env`):
-
-```bash
-HAWKNETIC_LOCAL_DB=external POSTGRES_PORT=54329 ./scripts/local.sh test
-```
-
-That covers a Codespaces service container, a system PostgreSQL, or a managed
-development database. The full suite runs against any of them.
-
 ## Infrastructure
 
-| Document | What it covers |
+| Document | Contents |
 | --- | --- |
-| [Current infrastructure](docs/CURRENT_INFRASTRUCTURE.md) | What is deployed, measured rather than configured |
-| [Target infrastructure](docs/TARGET_INFRASTRUCTURE.md) | Provider decisions and the evidence for each |
-| [Deployment](docs/DEPLOYMENT.md) | Commit to production, health endpoints, migrations |
-| [Infrastructure costs](docs/INFRASTRUCTURE_COSTS.md) | Measured per-service cost and where it goes |
-| [Recovery and rollback](docs/ROLLBACK.md) | Full-volume recovery, deploy rollback |
+| [Current infrastructure](docs/CURRENT_INFRASTRUCTURE.md) | What runs today, measured footprints, security posture, and what cannot be settled without account access |
+| [Target infrastructure](docs/TARGET_INFRASTRUCTURE.md) | The provider decision for Railway, Cloudflare, Neon, and Render, with the evidence for each |
+| [Infrastructure costs](docs/INFRASTRUCTURE_COSTS.md) | Rates, measured consumption, savings, and what would make costs rise |
+| [Deployment](docs/DEPLOYMENT.md) | How a reviewed commit reaches production, and per-service configuration |
+| [Rollback](docs/ROLLBACK.md) | Recovering a deploy, a migration, or a worker |
 
-Everything runs on Railway and GitHub. Cloudflare, Neon and Render were
-evaluated and are deliberately unused — see the target document for why.
+In short: Railway stays as the application platform and the production database;
+five hourly-or-slower workers become scheduled scale-to-zero services rather than
+containers that sleep; Neon covers development and CI databases only; Cloudflare
+provides DNS, TLS, and WAF in front of Railway; Render is not used. The database
+does **not** move to Neon — at this workload's cadence Neon's scale-to-zero cannot
+engage, which makes it roughly $17/month more expensive, not less.
+
+`scripts/railway_inventory.sh` reports the deployed services read-only, printing
+variable names rather than their values — except the role and mode selectors,
+which are the answer it exists to give.
 
 ## Database contract
 
@@ -180,6 +185,7 @@ Hosted staging and production are separate from local development and must use d
 - The sports board (`/sports.json` and the dashboard's sports panel) reads the rows the `sports-research` worker uploads. It reports `fresh`, `stale`, `blocked`, `empty`, or `unavailable` explicitly and withholds rows in every state except `fresh`. Each market publishes both the shopper's de-vig of the best available prices and the books' own consensus — each book de-vigged on its own, then the median — plus the signed gap between them. See `docs/sports-data-upload.md`.
 - Closing line value (`/sports-clv.json`, `sports-clv`) grades each recorded price against the last pre-start quote posted by the same bookmaker for the same market. It is a price comparison in probability points, not profit and not a settled result.
 - Other worker roles use the names documented by `python -m kalshi_research_bot worker --help`; they remain isolated from the web process.
+- `HAWKNETIC_SERVICE_MODE` selects how a worker runs. `loop` (the default) keeps the process resident and uses the worker's own cadence. `once` runs a single cycle and exits, so an hourly or slower worker can be a scheduled scale-to-zero service instead of a container that spends almost all of its life asleep. Switching is one variable and involves no data or schema change; an overlapping cron run and loop worker record `skipped_duplicate` rather than collecting twice. See `docs/DEPLOYMENT.md`.
 
 - `docs/data-sources.md`
 - `docs/sports-data-upload.md`

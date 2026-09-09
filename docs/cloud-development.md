@@ -23,6 +23,16 @@ Codespace Compose PostgreSQL: development and isolated tests only
 Railway PostgreSQL: staging or production only; never copied into .env
 ```
 
+Compose is the default development backend, not a requirement. Setting both
+`HAWKNETIC_DATABASE_URL` and `HAWKNETIC_TEST_DATABASE_URL` points
+`scripts/local.sh` at a managed development database — two Neon branches, or a
+PostgreSQL installed directly on the machine — and Compose is never invoked, so
+no Docker daemon is needed at all. The full suite has been run this way. Both
+URLs are required and must name different databases, and a Railway or Render host
+is refused unless `HAWKNETIC_ALLOW_HOSTED_DATABASE` is set. See
+`docs/TARGET_INFRASTRUCTURE.md` for why Neon is the right fit for a development
+database and the wrong one for this production database.
+
 The one Python web process in `paper_server.py` serves both the dashboard and
 `/api/v1`. Workers are always-on Python processes whose internal `WorkerSpec`
 loops provide cadence; they use the PostgreSQL `ops` schema and do not use a

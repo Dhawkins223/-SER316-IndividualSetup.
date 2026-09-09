@@ -1,269 +1,229 @@
-# Target Infrastructure
+# Target infrastructure
 
-The decisions below are the output of the 2026-09-08 infrastructure audit. Each
-one names the evidence it rests on. `docs/CURRENT_INFRASTRUCTURE.md` records what
-was measured; `docs/INFRASTRUCTURE_COSTS.md` does the arithmetic.
+The decision for each provider, the evidence behind it, and what stays exactly
+as it is.
 
-## The short version
+## Summary
 
-**Everything stays on Railway.** No workload moves to Cloudflare, Neon or
-Render, because for this workload each of those is either more expensive, less
-reliable, or both. The changes worth making are to stop paying for three
-databases where one is needed, to make the retention window able to bite, and to
-alarm on volume capacity before it is spent.
+**Railway remains the application platform.** Nothing moves off it. The change is
+that five workers stop being always-on containers and become scheduled ones.
 
+```mermaid
+graph TB
+    subgraph GH["GitHub"]
+        REPO[Master]
+        CI["PostgreSQL validation<br/>tests, lint, migrations, browser"]
+        SEC["Dependency + secret scanning<br/>weekly and per-PR"]
+        DEP["Deploy<br/>gated on validation succeeding"]
+    end
+
+    subgraph CF["Cloudflare — free, optional, needs your own domain"]
+        DNS["DNS + TLS + proxy<br/>WAF, rate limiting, asset caching"]
+    end
+
+    subgraph RW["Railway — paid, stays"]
+        WEB["web: dashboard + /api/v1<br/>always-on, carries the migration"]
+        HOT["kalshi-market-ingestion 300 s<br/>external-source-ingestion 900 s<br/>crypto-research 900 s<br/>always-on"]
+        CRON["sports-research, research-model-refresh,<br/>settlement-worker, raw-retention 1 h<br/>reporting-evaluation 6 h<br/>cron, scale-to-zero"]
+        PG[("PostgreSQL<br/>authoritative store")]
+    end
+
+    subgraph NE["Neon — free tier, development only"]
+        DEV[("dev + CI branches<br/>scale-to-zero when idle")]
+    end
+
+    REPO --> CI --> DEP --> WEB
+    REPO --> SEC
+    DEP --> HOT
+    DEP --> CRON
+    DNS --> WEB
+    WEB --> PG
+    HOT --> PG
+    CRON --> PG
+    REPO -.-> DEV
+
+    classDef optional stroke-dasharray: 5 5
+    class CF,NE,DNS,DEV optional
 ```
-GitHub  (source of truth, public repository)
-  │
-  ├── GitHub Actions ─ lint · migrations · 1047 tests · browser checks
-  │                    (free for public repositories)
-  │
-  └── Railway  ── Hobby plan, project `jubilant-liberation`, region iad
-        │
-        ├── HawkNeticSportsTools ....... web dashboard + Kalshi collection (300 s)
-        ├── SportsResearchProduction ... hourly sports research
-        ├── SettlementWorkerProduction . hourly settlement import
-        ├── RawRetentionProduction ..... hourly payload-body prune + capacity watch
-        └── Postgres-gxQB .............. the one application database
 
-Cloudflare  not used
-Neon        not used
-Render      not used
-```
+## Railway — keep, and keep most of it
 
-Deliberately removed: two of the three PostgreSQL instances, three staging
-services that have never run successfully, and the staging environment's
-never-applied 122-change patch.
+**Decision: Railway stays as the application platform and the production database.**
 
-`KalshiIngestionProduction` stays undeployed — see below. It is not a gap.
+The workload is a conventional long-running Python service with native
+dependencies (`psycopg[binary]`), a mounted volume, processes that run for
+minutes, and a database it holds pooled connections to. That is exactly what
+Railway is for and exactly what edge runtimes are not.
 
-## The decision that dominates everything else
+Railway's per-second metering also suits this shape better than flat per-instance
+pricing: nine mostly-idle services cost what they use, not nine instance fees.
+That single fact decides the Render question below.
 
-The account is on Railway's **Hobby** plan. Hobby provisions 5 GB volumes and
-5 GB is the plan ceiling. The production database reached 4.994 GB, PostgreSQL
-PANICked mid-write on 2026-09-01, and then could not restart because WAL
-recovery needs to write too.
+### The one change: schedule the slow workers
 
-So the binding constraint on this architecture is not compute cost. Compute is
-almost free here: the three workers together average **0.117 GB of RAM and
-0.00027 vCPU**, which bills at about **$1.16/month**. The constraint is 5 GB of
-volume, and the question every provider decision has to answer is what the
-database costs and where it can grow.
+Five of the eight workers run hourly or slower. Held resident they cost roughly
+$4/month of memory to sleep. As Railway cron services they cost their execution
+time, which is under 2% of that.
 
-## Database: stays on Railway PostgreSQL
+| Worker | Cadence | Target | Why |
+| --- | ---: | --- | --- |
+| `kalshi-market-ingestion` | 300 s | **always-on** | 288 starts/day; container boot would be a real fraction of the cycle, and it is the primary collector |
+| `external-source-ingestion` | 900 s | **always-on** | Saves ~$0.80/month as cron; not worth 96 daily cold starts yet |
+| `crypto-research` | 900 s | **always-on** | Same |
+| `sports-research` | 1 h | **cron** | 24 runs/day, seconds of work each |
+| `research-model-refresh` | 1 h | **cron** | Same |
+| `settlement-worker` | 1 h | **cron** | Same |
+| `raw-retention` | 1 h | **cron** | Maintenance; the most obviously schedulable of the set |
+| `reporting-evaluation` | 6 h | **cron** | 4 runs/day. Resident 21,600 s per few seconds of work |
 
-Neon was evaluated seriously and rejected on numbers.
+The mechanism is `HAWKNETIC_SERVICE_MODE=once`, which runs one cycle and exits.
+The cutover is safe because `run_worker_once` claims a cadence-derived
+idempotency key: if a cron service and a still-running loop worker overlap, the
+second records `skipped_duplicate` instead of collecting twice. Verified against
+a real database, not only in tests.
 
-The workload writes continuously: `kalshi-market-ingestion` runs every 300
-seconds, forever. Neon's economics depend on scale-to-zero, and a database
-written to every five minutes never scales to zero.
+Set the Railway cron schedule to match the cadence the worker already assumed —
+`0 * * * *` for the hourly four, `0 */6 * * *` for reporting.
 
-| | Railway PostgreSQL | Neon Free | Neon Launch |
-| --- | --- | --- | --- |
-| Storage limit | 5 GB on Hobby, 50 GB on Pro, 1 TB self-serve | **0.5 GB** | unlimited |
-| Storage price | $0.15/GB-month, billed on used | — | $0.35/GB-month |
-| Compute price | $10/GB-RAM + $20/vCPU per month, billed on used | — | $0.106/CU-hour |
-| Scale-to-zero useful here? | n/a | n/a | **no** — writes every 300 s |
-| Cost of ~2.5 GB + always-warm compute | **~$9.50/month** | does not fit | **$20-77/month** |
+### Also worth doing on Railway
 
-Neon's free tier holds 0.5 GB. This database needs roughly 2.5 GB at a healthy
-ten-day retention window — five times the free allowance — so "it is free" was
-never available as an argument. On Neon Launch, storage alone costs 2.3x
-Railway's rate, and compute that cannot suspend runs from **$19/month** at a
-quarter CU to **$77/month** at one CU. Railway's equivalent is about $9.50.
+- **Connect production to the repository.** Recorded as disconnected since
+  2026-08-03. Until it is connected or `deploy.yml` is wired up, a merged
+  migration reaches the database only when someone applies it by hand. This is a
+  correctness problem, not a cost one.
+- **Point every worker service at `railway.worker.json`**, as
+  `docs/railway-worker-services.md` already prescribes, so a worker does not run
+  the web service's pre-deploy migration.
+- **Settle the staging environment.** If it is idle, it is likely the largest
+  line on the bill. Ephemeral Neon branches (below) replace what it was for in
+  development.
 
-Migrating would also mean moving a database that currently cannot start, off a
-platform where its private networking, its pre-deploy migration hook, and its
-five dependent services already work.
+## Neon — yes, but only for development
 
-**Decision: keep PostgreSQL on Railway.** Revisit only if the database exceeds
-Railway Pro's ceilings or the write cadence becomes genuinely intermittent.
+**Decision: use Neon for development and CI databases. Do not move production.**
 
-## Cloudflare: not used
+### Why production must not move
 
-Cloudflare is excellent at the things this project does not have. There is no
-separate frontend — the dashboard is server-rendered by the same Python process
-that serves `/healthz` and `/readyz`, reading from PostgreSQL behind
-authentication. There is no static bundle to put on a CDN, no public asset
-traffic to cache, and no custom domain in play: the service is reached at
-`hawkneticsportstools-production.up.railway.app`.
+Neon bills compute by the CU-hour and saves money by suspending an idle database.
+This workload never lets it idle.
 
-Workers is the wrong runtime for every workload here. The collectors make
-long-running outbound HTTP requests on a schedule, hold PostgreSQL connections,
-and depend on `psycopg` — a compiled C extension.
+`kalshi-market-ingestion` runs every **300 seconds**. Neon's scale-to-zero
+suspends after **5 minutes** of inactivity. The collector's cadence is exactly
+the suspend threshold, so the database is woken again at or before the moment it
+would sleep. The mechanism that makes Neon cheap cannot engage here — and this
+holds regardless of the other seven workers, any of which would also keep it
+awake.
 
-**Decision: do not adopt Cloudflare.** Reconsider when a custom domain is
-registered, at which point Cloudflare DNS plus proxy is worth it for TLS, DDoS
-protection and WAF — none of which requires moving any workload.
+Pricing that out at Neon's minimum autoscaling size of 0.25 CU:
 
-## Render: not used
+| | Neon Launch, never idle | Railway PostgreSQL |
+| --- | ---: | ---: |
+| Compute | 0.25 CU × 730 h × $0.106 = **$19.35/mo** | ~0.25 GB RAM → **~$2.50/mo** |
+| Storage | ~1 GB × $0.35 = $0.35/mo | 0.78 GB × $0.15 = $0.12/mo |
+| **Total** | **~$19.70/month** | **~$2.62/month** |
 
-The brief asks five questions for any Render workload. For every workload here
-the answers are the same:
+Migrating production to Neon would cost roughly **$17/month more**, add a network
+hop between application and database, and introduce cold-start latency on any
+request that did catch it suspended. The free tier does not rescue this either:
+0.25 CU running continuously consumes 182 CU-hours/month against a 100 CU-hour
+allowance, exhausting it around day 16.
+
+**Do not migrate the database.** Not because migration is hard, but because it is
+five to seven times more expensive for this access pattern.
+
+### Where Neon does win
+
+A development database is idle almost all the time — which is precisely the shape
+scale-to-zero is designed for. An engineer actively working perhaps two hours a
+day uses ~15 CU-hours/month at 0.25 CU, comfortably inside the free 100.
+
+This is also the cleanest way to finish removing local Docker: `scripts/local.sh`
+now accepts `HAWKNETIC_DATABASE_URL` and `HAWKNETIC_TEST_DATABASE_URL`, so two
+Neon branches replace the Compose service with no daemon on the machine at all.
+Branching gives each feature branch a disposable copy of the schema.
+
+Keep `compose.yml`. It is the offline fallback, it is what CI uses, and deleting
+it would trade one hard dependency for another.
+
+## Cloudflare — DNS and edge protection only
+
+**Decision: use Cloudflare in front of the Railway web service. Do not host anything on it.**
+
+Worth doing, at no cost: DNS, TLS, WAF, rate limiting on the login endpoint,
+bot filtering, and origin hiding. For a dashboard exposed to the internet behind
+a password, rate limiting on `/login` is the single most valuable thing on this
+list.
+
+**Requires a domain you own.** Cloudflare cannot proxy a `*.up.railway.app`
+hostname. If there is no custom domain, this is the one prerequisite; everything
+else here is independent of it.
+
+**Do not move the frontend to Pages or Workers.** There is no frontend to move.
+The dashboard is server-rendered HTML from the same Python process that serves
+`/api/v1`, and the entire static payload is **160 KB** — `app.css`, `app.js`,
+two woff2 faces, shipped inside the wheel. Splitting 160 KB onto a second
+provider would add a deploy pipeline, a CORS and CSP surface, and a cache
+invalidation problem, to save a few milliseconds on assets that are already
+cached by the browser and can be cached at Cloudflare's edge anyway without
+moving them.
+
+Workers are also the wrong runtime for every backend component here: they cannot
+run `psycopg` native builds, hold pooled PostgreSQL connections, or run
+multi-minute collection cycles.
+
+## Render — no
+
+**Decision: do not use Render. Zero Render services in the target architecture.**
+
+Answering the required questions directly:
 
 - **Why Render?** No reason found.
-- **Why not Railway?** Railway already runs it, with private networking to the
-  database, config-as-code, and a working pre-deploy migration hook.
-- **How much does it save?** Nothing. Render's free web services sleep after 15
-  minutes of inactivity and its free PostgreSQL expires after 30 days. Paid
-  Render starts at $7/service/month, which is *more* than the ~$0.40/month each
-  worker costs on Railway's metered billing.
-- **What complexity does it add?** A second provider, a second deploy pipeline,
-  a second secret store, and cross-provider network latency to the database.
-- **What happens as it grows?** Render's per-service pricing scales linearly
-  with service count; Railway's metered model does not.
+- **Why not Railway?** Railway already runs this correctly and meters per second.
+- **How much does it save?** Nothing — it costs more. Render prices always-on
+  services at a flat **$7/month each**. The five always-on services here (web
+  plus three hot workers plus a database) would be roughly **$35/month** before
+  the database, against $6–19/month of metered Railway usage for the same shape.
+  Render's $1/month cron jobs are cheap in isolation but land at $5/month for the
+  five scheduled workers, where Railway cron is metered execution and costs cents.
+- **What complexity does it add?** A second deploy target, a second secret store,
+  a second set of service definitions, and cross-provider latency to the Railway
+  database.
+- **Free-tier limits?** Free services spin down on inactivity and free PostgreSQL
+  is explicitly not for production — both disqualifying for a collector on a
+  5-minute cadence.
+- **What happens as it grows?** Flat per-instance pricing scales worse than
+  metering for many small, mostly-idle services, which is exactly this topology.
 
-**Decision: use no Render services.** The final architecture contains zero.
+Render would be the right answer if Railway's metering were the problem. It is
+the thing making Railway cheap here.
 
-## Workers stay always-on rather than becoming scheduled jobs
+## What was considered and rejected
 
-The obvious cost move — the workers only run hourly, so make them cron jobs —
-does not survive measurement.
+| Option | Verdict | Reason |
+| --- | --- | --- |
+| Move PostgreSQL to Neon | Rejected | ~$17/month *more*; scale-to-zero cannot engage at a 300 s cadence |
+| Frontend to Cloudflare Pages | Rejected | No frontend exists; 160 KB of assets ship in the wheel |
+| Backend to Cloudflare Workers | Rejected | Native `psycopg`, pooled connections, multi-minute cycles |
+| Anything to Render | Rejected | Flat $7/service beats metering only above ~0.7 GB RAM per service |
+| Workers to GitHub Actions cron | Rejected | The user's own constraint, and correct: Actions has no execution guarantee, no `ops.worker_status` heartbeat, and would need production credentials in CI — which `ci.yml` explicitly asserts it does not have |
+| Delete `compose.yml` | Rejected | CI uses it and it is the offline fallback |
+| Delete the `/data` volume | Rejected | Content classification is recorded as pending; costs $0.12/month |
 
-| Worker | Cadence | RAM (7d avg) | CPU (7d avg) | Monthly |
-| --- | --- | ---: | ---: | ---: |
-| `SportsResearchProduction` | 3600 s | 0.0394 GB | 0.00010 vCPU | $0.39 |
-| `SettlementWorkerProduction` | 3600 s | 0.0413 GB | 0.00010 vCPU | $0.41 |
-| `RawRetentionProduction` | 3600 s | 0.0364 GB | 0.00007 vCPU | $0.36 |
+## Cost effect
 
-Railway bills actual consumption, not provisioned capacity, so an idle Python
-process costs almost nothing. Converting all three to Railway cron or GitHub
-Actions would save on the order of **$1/month** while adding scheduling
-configuration, cold starts, and — for GitHub Actions — production database
-credentials in a **public** repository's secrets, which the CI workflow
-currently asserts do not exist:
+| | Now | Target |
+| --- | ---: | ---: |
+| Railway resources | $14–19/mo (all workers on) | ~$10–14/mo |
+| Slow workers | ~$4/mo resident | ~$0.15/mo scheduled |
+| Staging, if idle and removed | $5–10/mo | $0 |
+| Neon | — | $0 (free tier, dev only) |
+| Cloudflare | — | $0 (free tier) |
+| Render | — | $0 (unused) |
 
-```yaml
-- name: Verify CI cannot target hosted infrastructure
-  run: test -z "${RAILWAY_TOKEN:-}"
-```
+**Expected saving: roughly $4/month from scheduling, plus $5–10/month if an idle
+staging environment is retired — $48–168/year.**
 
-That assertion is a deliberate security property. Trading it for a dollar a
-month is a bad exchange.
-
-**Decision: leave the workers as always-on Railway services.** This is exactly
-the case the brief warns about — a small saving that buys substantially more
-operational complexity.
-
-## Do not deploy `KalshiIngestionProduction` as-is
-
-It looks like an obvious omission: the 5-minutely market collector, the most
-important data path in the system, has never deployed — because no source
-repository is connected to it.
-
-Connecting one would be a mistake. The web service already collects Kalshi data
-on exactly that cadence, persisting a snapshot on every dashboard refresh under
-`worker_name="paper-dashboard-refresh"`. The 1.12 GB of `kalshi_public_api`
-bodies measured in production came from there.
-
-The two paths would not deduplicate. Uniqueness is
-`(batch_id, source_identifier, content_hash)` and every cycle opens a new batch,
-so running both would store two copies of every five-minute payload and roughly
-**double the ~166 MB/day** growth that filled the volume.
-
-If the dedicated worker is wanted — and there is a good argument for it, since
-it carries a cadence idempotency key and proper batch lineage while the
-dashboard path carries neither — then the dashboard's collection has to be
-turned off in the same change, by setting `DASHBOARD_REFRESH_SECONDS=0` on the
-web service. That variable exists for exactly this case: "a dashboard that reads
-only what the collector workers write."
-
-**Decision: leave it undeployed until someone makes that swap deliberately.**
-Consolidating collection onto the worker is the better long-term shape; doing
-half of it is worse than doing none.
-
-## Retention: the window has to be able to bite
-
-The window sets the table's steady state: `daily_growth x window_days`. Against
-the measured ~166 MB/day of raw payload bodies on a 5 GB volume:
-
-| Window | Steady-state payloads | Plus ~1 GB core | Verdict |
-| ---: | ---: | ---: | --- |
-| 45 days (`.env.example` shipped this) | ~7.5 GB | ~8.5 GB | impossible |
-| 30 days (code default) | ~5.0 GB | ~6.0 GB | impossible |
-| 10 days | ~1.7 GB | ~2.7 GB | **adopted** |
-| 7 days (module floor) | ~1.2 GB | ~2.2 GB | emergency setting |
-
-Both shipped defaults were unreachable, which is why retention pruned nothing
-while the volume filled. Changed in this audit:
-
-- `DEFAULT_RETENTION_DAYS` 30 → **10**
-- `.env.example` `RAW_RETENTION_DAYS` 45 → **10**
-- `RawRetentionProduction` on Railway set to `RAW_RETENTION_DAYS=10`,
-  `RAW_RETENTION_DRY_RUN=false`
-
-## Capacity alarm: the missing feedback loop
-
-The retention worker reported `database_bytes` on every cycle for weeks while
-that number climbed to the ceiling. Nothing compared it to anything.
-
-`database_capacity_state()` now turns it into a state, `build_internal_status()`
-raises a `database_capacity` anomaly, and `actionable_monitoring_events()`
-escalates it:
-
-| Used | State | Severity | Readiness | Headroom at ~250 MB/day |
-| ---: | --- | --- | --- | --- |
-| < 75% | ok | — | ready | — |
-| ≥ 75% | warning | warning | ready | ~5 days |
-| ≥ 90% | critical | **critical** | **degraded** | ~2 days |
-
-The ceiling comes from `DATABASE_VOLUME_CAPACITY_BYTES`, defaulting to 5 GB.
-Raise it after a volume resize.
-
-**It measures the volume, not the database.** `pg_database_size()` was the
-obvious query and the wrong one: it excludes every other database in the
-cluster and all of `pg_wal` — and `pg_wal` is what actually ran the volume out
-of space, as the PANIC's `pg_wal/xlogtemp.16755` says outright. Measured on an
-idle development cluster, the current database was **13 MB of the 191 MB the
-volume was really holding**, with WAL alone at 134 MB. An alarm reading only
-the first number would have reported 0.3% of a 5 GB ceiling while the volume
-was already 4% gone, and would have stayed quiet straight through the outage it
-exists to prevent.
-
-`volume_usage_bytes()` therefore sums every database in the cluster plus
-`pg_ls_waldir()`, and reports `cluster_bytes` and `wal_bytes` separately —
-"prune the database" and "WAL is not being recycled" are different problems with
-different fixes, and a single ratio does not say which. Reading WAL needs
-superuser or `pg_monitor`; where that is refused the probe degrades to the
-cluster total and sets `wal_measured: false` rather than failing the status
-build.
-
-## Local development: Docker optional
-
-`scripts/local.sh` exited 127 without Docker, so running the tests required a
-container runtime. It now supports three modes via `HAWKNETIC_LOCAL_DB`:
-
-| Mode | Behaviour |
-| --- | --- |
-| `auto` (default) | Compose when Docker is present, external otherwise |
-| `compose` | Require Docker; unchanged Codespaces path |
-| `external` | Use a PostgreSQL that is already running |
-
-Compose and the Codespaces flow are untouched and remain canonical. The full
-suite — **1047 tests, 128 seconds** — was verified during this audit against a
-system PostgreSQL 16 with no Docker running.
-
-## What has to happen next, and who can do it
-
-Three things need the account owner, because the Railway API available to this
-audit cannot do them and because two of them destroy data.
-
-1. **Recover the production database.** It cannot restart on a full volume.
-   Check the service's Backups tab first, but check the dates: the database grew
-   monotonically, so a snapshot's usefulness is a function of its date: the
-   volume held 778 MB on 2026-07-25 and ~5 GB at the PANIC, about 111 MB/day, so
-   a weekly snapshot from mid-August is around 2.8 GB and still workable while a
-   September one is not. `docs/ROLLBACK.md` has the table. Failing that, the
-   volume has to grow,
-   which Railway's published limits put on the Pro plan. `docs/ROLLBACK.md` has
-   the ordered runbook and the reason each step comes where it does.
-2. **Delete the two obsolete staging databases** — after taking a backup. They
-   hold ~10 GB between them and serve services that have not deployed
-   successfully since July and August.
-3. **Turn on "Wait for CI"** on each service. Railway's GitHub integration is
-   set to `checkSuites: false`, so pushes to `Master` deploy in parallel with CI
-   and a red build does not stop a release.
-
-Nothing in this document was applied to the two obsolete databases. They are
-5 GB volumes that could not be inspected or backed up from here, and an
-unverified backup is not a backup.
+That is a real but modest number, and it should be read alongside the two changes
+here that are not about money at all: production currently has no automated
+deployment path, and until this change the repository had no dependency or secret
+scanning. Those are worth more than the $4.

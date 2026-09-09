@@ -1,201 +1,181 @@
 # Deployment
 
-How this project gets from a commit to production, what runs where, and what to
-check when it does not. For recovery, see `docs/ROLLBACK.md`. For why the
-architecture is shaped this way, see `docs/TARGET_INFRASTRUCTURE.md`.
+How a reviewed commit reaches production, and how to change what runs there.
 
-Related, more specific documents: `docs/deployment-readiness-checklist.md` for
-the pre-release gate, `docs/railway-postgresql-deployment-and-rollback.md` for
-database-specific procedure, and `docs/environment-variables.md` for the full
-variable inventory.
+Read `TARGET_INFRASTRUCTURE.md` for *why* the architecture is shaped this way.
 
-## The path
+## The pipeline
 
-```
-commit → push to Master → GitHub
-                            │
-                            ├── GitHub Actions: lint · wheel · migrations · 1047 tests · browser checks
-                            │
-                            └── Railway: build (Railpack) → pre-deploy migration → start
+```text
+push / pull request
+   -> PostgreSQL validation  (lint, wheel, migrations, 1057 tests, 40 browser checks)
+   -> Dependency and secret scanning
+   -> [Master only] Deploy to Railway
+        -> web service first  (carries the pre-deploy migration)
+        -> worker services
+   -> post-deploy /healthz probe
 ```
 
-Both branches start on the same push. **Railway does not wait for CI** — every
-service has `checkSuites: false`, so a red build does not stop a release. Fixing
-that is a dashboard setting, per [Wait for CI](#turning-on-wait-for-ci) below.
+`deploy.yml` triggers on `workflow_run`, not on `push`. It refuses any run whose
+validation conclusion was not `success`, so production cannot advance from a red
+check. A `push` trigger could not express that ordering.
 
-## Services
+If `RAILWAY_TOKEN` is absent the deploy job emits a notice and skips. That is
+deliberate: an unconfigured repository should not show a red merge for a step
+nobody has opted into.
 
-All in Railway project `jubilant-liberation`, environment `production`,
-region `iad`, all deploying `Dhawkins223/HawkNeticSportsTools` on `Master`.
+## One-time setup
 
-| Service | Role | Config file | `HAWKNETIC_SERVICE` | Cadence |
+Nothing below is done for you; all of it needs account access.
+
+### 1. Railway deploy credentials
+
+In Railway: **Project → Settings → Tokens**, create a project token scoped to the
+production environment. In GitHub: **Settings → Secrets and variables → Actions**.
+
+| Kind | Name | Value |
+| --- | --- | --- |
+| Secret | `RAILWAY_TOKEN` | The project token |
+| Variable | `RAILWAY_WEB_SERVICE` | Exact name of the web service |
+| Variable | `RAILWAY_WORKER_SERVICES` | Space-separated worker service names |
+| Variable | `PRODUCTION_HEALTHCHECK_URL` | `https://<host>/healthz` (optional; skipped if unset) |
+
+Service names must match Railway exactly — `railway up --service` takes the name.
+`scripts/railway_inventory.sh` prints them.
+
+### 2. Connect production to the repository
+
+Recorded as disconnected since 2026-08-03. While that holds, neither
+config-as-code nor the pre-deploy migration is applied, and **a merged migration
+reaches the database only when someone runs it by hand.**
+
+Either connect the service to the repository in Railway (**Service → Settings →
+Source**), enabling "Wait for CI" so Railway does not deploy ahead of validation,
+or leave it disconnected and let `deploy.yml` push builds. Do not do both — two
+deploy paths racing on the same service produce an undefined winner.
+
+### 3. Per-service configuration
+
+Every service builds the same repository and picks its role from variables.
+
+| Service | `HAWKNETIC_SERVICE` | `HAWKNETIC_SERVICE_MODE` | Config path | Schedule |
 | --- | --- | --- | --- | --- |
-| `HawkNeticSportsTools` | Web dashboard | `railway.json` | `web` | always on |
-| `KalshiIngestionProduction` | Market collector | `railway.worker.json` | `kalshi-market-ingestion` | 300 s |
-| `SportsResearchProduction` | Sports research | `railway.worker.json` | `sports-research` | 3600 s |
-| `SettlementWorkerProduction` | Settlement import | `railway.worker.json` | `settlement-worker` | 3600 s |
-| `RawRetentionProduction` | Payload prune, capacity watch | `railway.worker.json` | `raw-retention` | 3600 s |
-| `Postgres-gxQB` | Application database | — | — | always on |
+| web | `web` | — | `railway.json` | always-on |
+| kalshi ingestion | `kalshi-market-ingestion` | `loop` | `railway.worker.json` | always-on |
+| external sources | `external-source-ingestion` | `loop` | `railway.worker.json` | always-on |
+| crypto research | `crypto-research` | `loop` | `railway.worker.json` | always-on |
+| sports research | `sports-research` | `once` | `railway.worker.json` | `0 * * * *` |
+| model refresh | `research-model-refresh` | `once` | `railway.worker.json` | `0 * * * *` |
+| settlement | `settlement-worker` | `once` | `railway.worker.json` | `0 * * * *` |
+| raw retention | `raw-retention` | `once` | `railway.worker.json` | `0 * * * *` |
+| reporting | `reporting-evaluation` | `once` | `railway.worker.json` | `0 */6 * * *` |
 
-A worker's role comes entirely from `HAWKNETIC_SERVICE`. All of them run the
-same image and the same start command; only the variable differs.
+Set the config path under **Service → Settings → Config as code**. Only the web
+service may use `railway.json`: it is the one that carries the pre-deploy
+migration, and a worker inheriting it would run `database-migrate` on every
+deploy and fail to deploy at all whenever the database was briefly unavailable.
 
-Only the web service carries `railway.json`, and only `railway.json` declares a
-pre-deploy migration. Workers point at `railway.worker.json` precisely so that
-they do not each try to migrate the database on every deploy.
+Workers run with `DATABASE_MIGRATION_MODE=check`. A worker facing an unmigrated
+schema fails its cycle and backs off, which is recoverable.
 
-### Roles that exist in code but have no service
+## Converting a worker to a scheduled service
 
-`external-source-ingestion`, `crypto-research`, `research-model-refresh` and
-`reporting-evaluation` are defined in `SERVICE_SPECS` and have no Railway
-service. They are runnable locally with `worker --service <name> --once`.
-Deploying one means creating a service, pointing it at `railway.worker.json`,
-and setting `HAWKNETIC_SERVICE`. Budget about $0.40/month each.
+**The cron schedule must not fire more often than the worker's own cadence.**
+`run_worker_once` claims an idempotency key derived from
+`SERVICE_SPECS.cadence_seconds`, so every run after the first inside one cadence
+window records `skipped_duplicate` and exits 0. A 15-minute schedule on
+`reporting-evaluation`, whose cadence is 21,600 s, fires 24 times per six-hour
+window and collects on exactly one of them — 24 green runs for one collection.
+The logs look healthy throughout. Match the schedule to the cadence, or change
+the cadence in `SERVICE_SPECS` deliberately.
+
+That same key is what protects the cutover against double collection, within one
+limit worth stating plainly: it deduplicates two runs landing in the *same*
+cadence bucket, and it is not a lock. A loop cycle that straddles a bucket
+boundary can still overlap a cron run that claims the next one. So change the
+mode by deploying rather than by running both side by side — replacing the
+container leaves no second collector.
+
+1. Set `HAWKNETIC_SERVICE_MODE=once` on the service.
+2. Set the cron schedule under **Service → Settings → Cron Schedule**.
+3. Deploy. This replaces the always-on container rather than adding to it.
+4. Confirm one clean run: the deploy log ends with `worker_succeeded` and the
+   container exits 0.
+5. Confirm the heartbeat advanced:
+
+   ```sql
+   SELECT worker_name, status, consecutive_failures, last_error_code, heartbeat_at
+   FROM ops.worker_status ORDER BY worker_name;
+   ```
+
+Reverting is one variable: set `HAWKNETIC_SERVICE_MODE=loop`, clear the schedule,
+redeploy. No data or schema change is involved in either direction.
+
+Railway does not start a new cron run while the previous one is still going, so a
+cycle that overruns its schedule delays the next rather than overlapping it.
 
 ## Migrations
 
-Migrations are versioned, forward-only, and live in `migrations/postgres`
-(currently 0001-0016). They run as the web service's **pre-deploy command**:
+Forward-only SQL in `migrations/postgres/`, applied by the web service's
+pre-deploy command:
 
 ```
 PYTHONPATH=src python -m kalshi_research_bot database-migrate
 ```
 
-Consequences worth knowing:
+It may run migrations **only** — never seed, collect, start workers, train
+models, alter safety flags, or reset data. Application is serialized by an
+advisory lock, so concurrent deploys cannot both apply, and CI proves both the
+idempotence and the serialization on every run.
 
-- A failing migration fails the deploy, and the previous version keeps serving.
-- A database that is unreachable also fails the deploy. This is what the
-  2026-09-01 outage looks like from the deploy log:
-  `failure stage: PRE_DEPLOY_COMMAND`.
-- Workers run `DATABASE_MIGRATION_MODE=check` and refuse to start against a
-  database missing a version they need, so a merged-but-unapplied migration
-  crash-loops every worker. `/internal/status.json` reports this as
-  `pending_migrations`, distinct from `database_failure`.
-- There is no down-migration. Reversing a migration means restoring a backup.
+Check state without applying:
 
-Volumes are not mounted during pre-deploy, so a pre-deploy command must never
-read or write the volume.
+```bash
+PYTHONPATH=src python -m kalshi_research_bot.db_command status
+```
 
-## Health and readiness
+## Verifying a deploy
 
 | Endpoint | Meaning |
 | --- | --- |
-| `/healthz` | Process is up. `{"status": "ok"}` |
-| `/readyz` | Serving-ready: database reachable, migrations applied, data fresh. `503` while any gate is unmet |
-| `/internal/status.json` | Workers, heartbeats, migration state, `storage`, and `anomalies`. Never publicly exposed |
+| `/healthz` | The process answers. `status: ok` |
+| `/readyz` | PostgreSQL reachable, migrations applied, source data fresh |
 
-`/readyz` returning `503` with `database.ready: true` and `data_gate` not ready
-is a healthy cold start, not a fault — the collectors have not yet produced
-fresh data. CI asserts exactly this shape.
+`/readyz` returning 503 with `"database": {"ready": true}` and a non-ready data
+gate is a *correct* response on a fresh database with no collected evidence yet —
+CI asserts exactly that. It means the schema is fine and no data has arrived.
 
-### Storage anomalies
+Then confirm every deployed worker has a recent `heartbeat_at` in
+`ops.worker_status`. A worker with no row has never completed a cycle; a stale
+heartbeat means it stopped. An unapplied migration presents as a stopped worker,
+so check migration status before concluding a service is broken.
 
-`/internal/status.json` carries a `storage` block and raises a
-`database_capacity` anomaly at 75% of `DATABASE_VOLUME_CAPACITY_BYTES`
-(warning) and 90% (critical). A critical anomaly also drops the top-level
-status to `degraded`. This exists because the database filled its volume to
-100% while reporting its own size every hour and nothing ever compared that
-number to the ceiling. Treat a critical capacity anomaly as an outage in
-progress: a full volume stops PostgreSQL and then blocks its own recovery.
+## Local development
 
-The measurement covers the **volume** — every database in the cluster plus
-`pg_ls_waldir()` — not `pg_database_size()` of one database, because WAL is
-what filled it. The block reports `cluster_bytes` and `wal_bytes` separately, so
-a rising ratio says whether to prune rows or to look at WAL recycling. Reading
-WAL needs superuser or `pg_monitor`; without it `wal_measured` is `false` and
-the figure is a floor rather than the truth.
-
-## Configuration precedence, and the drift to be aware of
-
-Four files in this repository describe how to start the application, and they do
-not agree:
-
-| File | Start command | Used by |
-| --- | --- | --- |
-| `railway.json` | `service-start`, healthcheck `/healthz`, pre-deploy migrate | the web service |
-| `railway.worker.json` | `service-start`, no pre-deploy | the four workers |
-| `Procfile` | `paper … --refresh-seconds 900` | nothing on Railway |
-| `nixpacks.toml` | `paper … --refresh-seconds 900` | nothing (the builder is Railpack) |
-
-The live web service additionally has a dashboard start command of
-`paper --host 0.0.0.0 --port ${PORT:-8000}` with no healthcheck, while its public
-domain routes to **port 8080** and `PORT` is not among its variables.
-
-None of this was changed during the 2026-09-08 audit: production is down, and a
-start-command change that cannot be verified against a running system is a
-change made blind. It is recorded here because the next person to deploy the web
-service should reconcile it deliberately — `railway.json` is the file that
-should win, and the port mismatch should be resolved by setting `PORT=8080` or
-by pointing the domain at the port the process actually binds.
-
-## Environment variables
-
-Full inventory in `docs/environment-variables.md`; CI fails if a key in
-`.env.example` is missing from it.
-
-Never in the repository, always in Railway Variables:
-`DATABASE_URL`, `DATABASE_MIGRATION_URL`, `DASHBOARD_AUTH_PASSWORD`, and any
-provider credential.
-
-The safety flags below are `false` in production and asserted `false` by CI.
-They are what makes this a research-only system:
-
-```
-RESEARCH_ONLY=true
-LIVE_EXECUTION_ENABLED=false
-AUTO_TRADE_ENABLED=false
-AUTO_UPLOAD_ENABLED=false
-KALSHI_ORDER_UPLOAD_ENABLED=false
-MODEL_PROMOTION_ENABLED=false
-```
-
-## Turning on Wait for CI
-
-Railway's GitHub integration currently deploys on push without regard to check
-status. To gate it, for each of the five services:
-
-> Railway dashboard → `jubilant-liberation` → `production` → service →
-> **Settings** → **Source** → enable **Wait for CI**
-
-After that a failing `PostgreSQL validation` workflow blocks the deploy.
-
-This is a dashboard setting rather than something the repository can assert,
-and it is not available through the Railway API used by this audit.
-
-The alternative — deploying from a GitHub Actions job with a `RAILWAY_TOKEN` —
-is deliberately rejected. This repository is **public**, and the CI workflow
-asserts that no Railway credential exists in it:
-
-```yaml
-- name: Verify CI cannot target hosted infrastructure
-  run: |
-    test -z "${RAILWAY_TOKEN:-}"
-    test -z "${RAILWAY_API_TOKEN:-}"
-```
-
-Keep that property. Use Wait for CI instead.
-
-## Deploying by hand
-
-Railway builds from GitHub, so the normal path is a push. To redeploy without a
-new commit, use **Redeploy** on the service in the dashboard, or:
+Two backends. Compose is the default; neither needs a change to application code.
 
 ```bash
-railway up --project dfc58505-d45f-4093-8050-35f5371bbf37 \
-           --environment cd5e7bc2-b6e5-4c1a-a442-8e1a2b9cb64a \
-           --service <service-id>
+# Docker-backed (default)
+./scripts/local.sh dev
+
+# No Docker daemon: a managed development database, e.g. two Neon branches
+export HAWKNETIC_DATABASE_URL='postgresql://.../dev'
+export HAWKNETIC_TEST_DATABASE_URL='postgresql://.../dev_test'
+./scripts/local.sh test
 ```
 
-A service that has never deployed cannot be started by redeploy — it needs
-`railway up` or a repository connection made in the dashboard.
+Both URLs are required and must resolve to different databases — `test` writes to
+the test database, and the script asks each server for `current_database()` and
+its address, so two URLs differing only in credentials or options are refused. A
+Railway or Render host is refused unless `HAWKNETIC_ALLOW_HOSTED_DATABASE` is
+set. Never point either at production.
 
-## Pre-deploy checklist
+## Rules
 
-1. `python -m ruff check .`
-2. `./scripts/local.sh test` — the full suite, 1047 tests
-3. `./scripts/local.sh verify` — configuration, migrations, tests, smoke
-4. Confirm any new `.env.example` key is in `docs/environment-variables.md`
-5. Confirm new migrations apply twice cleanly (CI does this; it catches
-   non-idempotent migrations)
-6. Check `/internal/status.json` for a `database_capacity` anomaly before adding
-   a collector — a new source shortens the volume runway
+- Production must not advance from an unreviewed branch or a failing check.
+- Never place credentials in tracked files. Railway Variables, GitHub Secrets, or
+  Codespaces Secrets only.
+- Never point a Codespace, a test process, or CI at production. `ci.yml` asserts
+  it holds no Railway credentials.
+- The pre-deploy command runs migrations only.
+- Verify a replacement before removing what it replaces.

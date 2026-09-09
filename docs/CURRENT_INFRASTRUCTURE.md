@@ -1,309 +1,243 @@
-# Current Infrastructure
+# Current infrastructure
 
-Measured against the live Railway account on **2026-09-08**. Every number here
-came from Railway's metrics and deployment APIs rather than from configuration,
-because the deployed system and the repository had drifted apart in ways that
-only measurement showed.
+What this project is, what runs it today, and which parts of that are
+established fact rather than inference.
 
-Read `docs/TARGET_INFRASTRUCTURE.md` for where this is going and why, and
-`docs/INFRASTRUCTURE_COSTS.md` for the arithmetic behind the money.
+## Evidence status
 
-## Headline: production is down, and has been since 2026-09-01
+This audit was performed from the repository with a working runtime: the full
+suite, migrations, lint, the wheel build, and the browser checks were all run
+and all pass. It was **not** performed with Railway, Cloudflare, Neon, or Render
+credentials, because none were available to the session.
 
-The production database filled its 5 GB volume and PostgreSQL took itself down
-mid-write:
+So everything below is one of three kinds of claim, and they are labelled:
 
-```
-2026-09-01 22:48:31 UTC [16755] PANIC:  could not write to file "pg_wal/xlogtemp.16755": No space left on device
-2026-09-01 22:48:32 UTC [16771] FATAL:  could not write to file "pg_wal/xlogtemp.16771": No space left on device
-2026-09-01 22:48:32 UTC [27]    LOG:  startup process (PID 16771) exited with exit code 1
-2026-09-01 22:48:32 UTC [27]    LOG:  shutting down due to startup process failure
-```
+- **Measured** — observed directly in this session.
+- **Recorded** — taken from a dated document in this repository.
+- **Unverified** — cannot be settled without account access. `scripts/railway_inventory.sh`
+  settles most of these in one command.
 
-That second line is the one that matters. WAL recovery needs to write, and a
-volume at 100% has nowhere to write, so the database could not restart itself.
-Its container was stopped on 2026-09-04 and everything downstream followed:
+Two recorded claims already contradict each other; see [Unresolved](#unresolved).
 
-| Symptom | Where | Since |
-| --- | --- | --- |
-| `PANIC: No space left on device`, cannot recover | `Postgres-gxQB` | 2026-09-01 |
-| Deploy fails at `PRE_DEPLOY_COMMAND` (`database-migrate`) | `HawkNeticSportsTools` | every deploy since 2026-09-02 |
-| `failed to resolve host 'postgres-gxqb.railway.internal'` | `HawkNeticSportsTools` | 2026-09-04 |
-| `worker_cycle_crashed … database_connection_failed`, restarting forever | all three production workers | 2026-09-04 |
+## The application
 
-The three workers report deployment status `SUCCESS`. They are not healthy —
-they are crash-looping. A `SUCCESS` deployment means the container started, not
-that the process inside it is doing anything.
+One Python package, `kalshi_research_bot`, ~37,000 lines across 100 modules.
+There is no JavaScript application, no package manager workflow, and no
+frontend build. (Measured.)
 
-### Update, 2026-09-09: everything is now stopped
+| Property | Value |
+| --- | --- |
+| Language | Python 3.12 (`runtime.txt`, `requires-python`) |
+| Runtime dependencies | `psycopg[binary]`, `psycopg_pool` — that is all |
+| Build | Nixpacks on Railway; setuptools wheel elsewhere |
+| Database | PostgreSQL only. 16 forward-only SQL migrations in `migrations/postgres/` |
+| Web framework | None. `paper_server.py` is a stdlib HTTP server |
+| Frontend | Server-rendered HTML plus 160 KB of static assets shipped in the wheel |
+| Queue / cache / Redis | None. The `ops` schema in PostgreSQL is the coordination layer |
+| Tests | 1057, ~2 minutes against a real PostgreSQL |
 
-Re-measured a day later. The crash-looping ended, and not by recovering:
+The dashboard and `/api/v1` are served by the same process. Roles are selected
+at start by `HAWKNETIC_SERVICE`: `web`, or one of eight workers.
 
-| Service | Then (2026-09-08) | Now (2026-09-09) |
-| --- | --- | --- |
-| `SportsResearchProduction` | crash-looping | stopped 16:18:16 UTC, deployment `REMOVED` |
-| `SettlementWorkerProduction` | crash-looping | stopped 16:18:17 UTC, deployment `REMOVED` |
-| `RawRetentionProduction` | crash-looping | stopped 16:18:18 UTC, deployment `REMOVED` |
-| `HawkNeticSportsTools` | failing every deploy | unchanged, last deployment still `FAILED` |
-| `Postgres-gxQB` | stopped, cannot restart | unchanged, 4.99 GB still on the volume |
-| `postgres` (`ravishing-elegance`) | idle, 0.046 GB RAM | 0 GB RAM — stopped as well |
+### Workloads
 
-The workers went down cleanly rather than crashing — a SIGTERM, then
-`worker_stopped` in their own logs, after `consecutive_crashes` reached 11.
-All three within 1.5 seconds, which makes it one action rather than three
-failures. Whether that was the account owner or Railway reclaiming a workload
-that had been failing for 40 minutes is not visible from the API.
+| Component | Class | Cadence | Always-on today |
+| --- | --- | ---: | --- |
+| `web` dashboard + `/api/v1` | HTTP API + server-rendered UI | continuous | yes |
+| `kalshi-market-ingestion` | Data ingestion | 300 s | yes |
+| `external-source-ingestion` | Scraper / ingestion | 900 s | yes |
+| `crypto-research` | Batch modelling | 900 s | yes |
+| `sports-research` | Batch modelling | 3600 s | yes |
+| `research-model-refresh` | Batch modelling | 3600 s | yes |
+| `settlement-worker` | Scheduled reconciliation | 3600 s | yes |
+| `raw-retention` | Scheduled maintenance | 3600 s | yes |
+| `reporting-evaluation` | Scheduled reporting | 21600 s | yes |
+| PostgreSQL | Database | continuous | yes |
 
-**Nothing in either project is running now.** Every compute metric reads 0 and
-only volumes remain, which bills at:
+(Cadences measured from `worker_services.SERVICE_SPECS`.)
 
-| Volume | Used | Monthly |
-| --- | ---: | ---: |
-| `Postgres-gxQB` | 4.995 GB | $0.75 |
-| `Postgres` (staging) | 4.995 GB | $0.75 |
-| `Postgres-GDG0` (staging) | 4.987 GB | $0.75 |
-| `HawkNeticSportsTools` `/data` | 0.769 GB | $0.12 |
-| `postgres` (`ravishing-elegance`) | 0.184 GB | $0.03 |
-| **Total** | **15.93 GB** | **$2.39** |
+Every worker is an always-on process whose own `WorkerSpec` loop provides the
+schedule. **Five of the eight run hourly or slower.** A worker on the 6-hour
+cadence is resident for 21,600 seconds to do a few seconds of work, and Railway
+meters memory for every one of those seconds. That is the single clearest
+inefficiency in the current design, and it is what `HAWKNETIC_SERVICE_MODE=once`
+now makes fixable.
 
-That is under Hobby's $5 included usage, so the bill is now just the $5
-subscription — the cheapest this account has been, and only because none of it
-works. It also means the two obsolete staging databases now cost $1.50/month
-rather than the $25.38/month they cost while running: deleting them is still
-right, but it is no longer the urgent saving. Recovering the production
-database is.
+### Measured process footprint
 
-One operational consequence: a `REMOVED` deployment does not restart when its
-dependency comes back. The workers will not return on their own once PostgreSQL
-is running — they have to be redeployed. `docs/ROLLBACK.md` step 3 covers it.
+| Process | Resident set after import |
+| --- | ---: |
+| Bare Python 3.12 interpreter | 9.2 MB |
+| Worker stack loaded | 25.8 MB |
+| `paper_server` (web role) loaded | 27.2 MB |
 
-## Providers in use
+These are import-time floors, not steady state. A cycle that fetches and parses
+source payloads, plus a connection pool of up to `DATABASE_POOL_MAX_SIZE` (5),
+raises the working set well above this. Treat 60–120 MB per running service as
+the planning range and the floors above as the hard lower bound.
 
-| Provider | Role today | Authenticated for this audit |
-| --- | --- | --- |
-| GitHub | Source of truth, CI, Railway deploy trigger | yes |
-| Railway | All compute and all PostgreSQL, two projects | yes |
-| Cloudflare | none | no credentials available |
-| Neon | none | no credentials available |
-| Render | none | no credentials available |
+## Provider map
 
-Cloudflare, Neon and Render hold no resources for this project, so nothing had
-to be read from them to map what exists. `docs/TARGET_INFRASTRUCTURE.md` records
-whether each one should.
+```mermaid
+graph TB
+    subgraph GH["GitHub — source of truth"]
+        REPO[Master branch]
+        CI["Actions: PostgreSQL validation<br/>1057 tests + browser + lint"]
+    end
 
-## Railway: two projects, fifteen services
+    subgraph RW["Railway — the only hosted runtime"]
+        WEB["web service<br/>dashboard + /api/v1<br/>volume mounted at /data"]
+        WORKERS["worker services<br/>HAWKNETIC_SERVICE selects the role<br/>(how many are deployed is unresolved)"]
+        PG[("PostgreSQL<br/>authoritative store")]
+        STG["staging environment<br/>separate PostgreSQL + volume"]
+    end
 
-### `jubilant-liberation` — this repository
+    DEV["Codespace / laptop<br/>Compose PostgreSQL, or an<br/>external database (new)"]
 
-**production** (`cd5e7bc2-b6e5-4c1a-a442-8e1a2b9cb64a`)
+    REPO --> CI
+    CI -.->|"no automated deploy today"| WEB
+    WEB --> PG
+    WORKERS --> PG
+    DEV -.->|never points at production| PG
 
-| Service | Purpose | Runtime | RAM (7d avg) | CPU (7d avg) | Volume | State |
-| --- | --- | --- | ---: | ---: | ---: | --- |
-| `HawkNeticSportsTools` | Web dashboard, `/healthz`, `/readyz` | Python 3.12, Railpack | 0.206 GB | — | 5 GB provisioned, 0.77 GB used, `/data` | **failing every deploy** |
-| `SportsResearchProduction` | `sports-research` worker, hourly | Python 3.12 | 0.039 GB | 0.00010 vCPU | none | crash-looping |
-| `SettlementWorkerProduction` | `settlement-worker`, hourly | Python 3.12 | 0.041 GB | 0.00010 vCPU | none | crash-looping |
-| `RawRetentionProduction` | `raw-retention`, hourly | Python 3.12 | 0.036 GB | 0.00007 vCPU | none | crash-looping |
-| `KalshiIngestionProduction` | `kalshi-market-ingestion`, 5-minutely | Python 3.12 | — | — | none | **never deployed** |
-| `Postgres-gxQB` | Application database | `postgres-ssl:18` | 0.908 GB | 0.00023 vCPU | 5 GB provisioned, **4.99 GB used (99.9%)** | **stopped, cannot restart** |
-
-**staging** (`14f937a9-34e4-4720-afc4-509e910c64dc`)
-
-| Service | RAM (7d avg) | Volume | Last deployment |
-| --- | ---: | ---: | --- |
-| `Postgres` | 2.46 GB while running | 5 GB provisioned, **4.99 GB used** (us-west2) | stopped 2026-09-04 |
-| `Postgres-GDG0` | 0 (stopped) | 5 GB provisioned, **4.99 GB used** (iad) | stopped |
-| `HawkNeticResearchStaging` | — | none | **FAILED 2026-07-13** |
-| `SportsResearchStaging` | — | none | **FAILED 2026-08-16** |
-| `KalshiIngestionStaging` | — | none | **never deployed** |
-
-The staging environment also carries a staged, never-applied change patch of
-**122 changes**.
-
-### `ravishing-elegance` — a different product
-
-This project does not build this repository. Both of its application services
-deploy `Dhawkins223/hawknetic-office`, a Node/pnpm monorepo with its own auth,
-payments and Redis configuration.
-
-| Service | Source | RAM (7d avg) | Volume | State |
-| --- | --- | ---: | ---: | --- |
-| `hawknetic-office` | `hawknetic-office`, `main` | — | none | FAILED 2026-09-05 |
-| `hawknetic-workers` | `hawknetic-office`, `main` | — | none | FAILED 2026-08-26 |
-| `postgres` | `postgres-ssl` image | 0.046 GB | 0.18 GB used | idle |
-| `redis` | Redis image | — | none | never deployed |
-
-It is listed because it spends from the same Railway subscription. Nothing in
-this audit changes it: its source repository was not available here, so its
-services cannot be verified, and an unverified service is not one to delete.
-
-## Three databases, all full, none serving
-
-The single most important structural fact about this account:
-
-| Database | Environment | Region | Used | Capacity | Serving |
-| --- | --- | --- | ---: | ---: | --- |
-| `Postgres-gxQB` | production | iad | 4.994 GB | 5 GB | no |
-| `Postgres` | staging | us-west2 | 4.995 GB | 5 GB | no |
-| `Postgres-GDG0` | staging | iad | 4.987 GB | 5 GB | no |
-
-Three PostgreSQL instances, each independently grown to within 13 MB of the
-same 5 GB ceiling. The repository's own audit
-(`docs/railway-volume-storage-audit.md`, 2026-07-25) recorded the production
-volume at 778 MB and a staging volume at 341 MB. Both reached the ceiling in the
-six weeks after.
-
-5 GB is not an arbitrary number: it is the volume size Railway's **Hobby** plan
-provisions, and the plan's ceiling. Growing past it requires the Pro plan.
-
-## Why it filled: the retention window could never bite
-
-`raw.source_payloads` stores one full response body per collection cycle.
-`docs/raw-payload-retention.md` measured the growth at roughly **166 MB/day** of
-payload bodies against **230-280 MB/day** of total database growth, and worked
-out what that implies:
-
-```
-steady_state_size = daily_growth x window_days
+    classDef gap stroke-dasharray: 5 5
+    class CI,STG gap
 ```
 
-At 166 MB/day a thirty-day window wants ~5.0 GB of payload bodies alone, on a
-volume that holds 5 GB in total. The window was therefore never reachable: rows
-never aged into eligibility, every retention pass pruned nothing, and the volume
-filled anyway. A window wider than the data's own age is indistinguishable from
-having no retention at all, which is what `window_bites: false` was added to
-report.
+### Railway
 
-The shipped defaults made this the expected outcome rather than an accident:
+Railway is the only hosted runtime. Recorded facts, with dates:
 
-| Setting | Value before this audit | Implied steady state | Fits 5 GB? |
-| --- | ---: | ---: | --- |
-| `DEFAULT_RETENTION_DAYS` (code) | 30 | ~5.0 GB payloads | no |
-| `RAW_RETENTION_DAYS` (`.env.example`) | 45 | ~7.5 GB payloads | no |
-| Production's documented setting | 10 | ~1.7 GB payloads | yes |
+- Production volume mounted at `/data`, **778.44 MB used of 5,000 MB**, attached
+  only to the production web service (`docs/railway-volume-storage-audit.md`,
+  2026-07-25).
+- Staging PostgreSQL volume at `/var/lib/postgresql/data`, **341.11 MB of
+  5,000 MB** (same document).
+- On 2026-08-03 the production service had **no active repository source and no
+  PostgreSQL binding** (`docs/railway-postgresql-deployment-and-rollback.md`).
+- Because production is not connected to the repository, neither its
+  config-as-code nor its pre-deploy migration is applied, so **a merged
+  migration reaches the database only when someone applies it by hand**
+  (`docs/railway-worker-services.md`, `docs/schema-migration-application.md`).
 
-And nothing escalated. The retention worker reported `database_bytes` on every
-cycle while that number climbed to the ceiling; the value was recorded and never
-compared against anything.
+Volumes are billed on provisioned-but-used storage, so 778 MB is roughly
+$0.12/month — the volume is not a cost problem. It does, however, pin the web
+service to a single replica.
 
-## Workload inventory
+What the `/data` volume actually holds is generated reports, feature/label CSVs
+and JSON payload snapshots (traced through `config.repo_path`). PostgreSQL is
+the authoritative store — `DASHBOARD_PAYLOAD_SOURCE=postgres`, and the dashboard
+reads `raw.source_payloads`. The volume content is therefore mostly
+*reconstructable* rather than authoritative, but the repository's own audit
+records classification as **pending**, so nothing on it should be deleted on the
+strength of this document.
 
-| # | Component | Class | Where it runs | Cadence |
-| --- | --- | --- | --- | --- |
-| 1 | Dashboard / `/healthz` / `/readyz` | HTTP API + server-rendered UI | Railway `HawkNeticSportsTools` | always on |
-| 2 | Kalshi market collection | Scraper / ingestion | **the web service's refresh**, not the worker named for it | 300 s |
-| 3 | `external-source-ingestion` | Scraper / ingestion | not deployed | 900 s |
-| 4 | `crypto-research` | Batch compute | not deployed | 900 s |
-| 5 | `sports-research` | Scraper + batch compute | Railway `SportsResearchProduction` | 3600 s |
-| 6 | `research-model-refresh` | Batch compute | not deployed | 3600 s |
-| 7 | `settlement-worker` | Background worker | Railway `SettlementWorkerProduction` | 3600 s |
-| 8 | `reporting-evaluation` | Batch reporting | not deployed | 21600 s |
-| 9 | `raw-retention` | Maintenance | Railway `RawRetentionProduction` | 3600 s |
-| 10 | PostgreSQL | Database | Railway `Postgres-gxQB` | always on |
-| 11 | Migrations | Schema | Railway pre-deploy command | per deploy |
-| 12 | Tests, lint, browser checks | CI | GitHub Actions | per push/PR |
+### Cloudflare, Neon, Render
 
-There is no queue, no cache service, no object storage, no payment processing,
-no WebSocket transport and no ML serving in the deployed system. `STRIPE_ENABLED`,
-`VERCEL_ENABLED`, `AIRTABLE_ENABLED`, `POSTHOG_ENABLED`, `GOOGLE_DRIVE_ENABLED`
-and `SLACK_ALERTS_ENABLED` exist as feature flags on the web service; the Redis
-service in the other project belongs to the other product.
+None of the three hosts anything, in production or anywhere else. There is no
+`wrangler.toml`, no `render.yaml`, no configured provider hostname, and no
+provider-specific connection handling. (Measured — a repository-wide search for
+provider hostnames returns no configured endpoint.)
 
-Six of the nine worker roles are defined in `SERVICE_SPECS` but have no Railway
-service. They are code paths, not running infrastructure.
+They are named in the tree, and the distinction matters in a document whose
+purpose is to separate fact from inference. `scripts/local.sh` and `.env.example`
+name Neon as an optional managed *development* database. Render appears in
+`scripts/local.sh` as a host the local workflow refuses to run tests against, and
+in `README.md` and this repository's own infrastructure documents as a provider
+that was evaluated and rejected. None of those mentions is a deployment: they are
+guidance, guards, and decisions recorded with their reasons.
 
-### Kalshi collection actually happens in the web service
+### GitHub
 
-`KalshiIngestionProduction` has never deployed because it has **no source
-repository connected** — its config carries variables, private networking and a
-region, and no `source` at all. It has never collected anything.
+`\.github/workflows/ci.yml` — "PostgreSQL validation" — is genuinely thorough,
+and more rigorous than most projects this size:
 
-Collection happens anyway, in the web service. `paper_server.py` persists a
-snapshot on every dashboard refresh:
+- Migrations applied from empty, then repeated to prove idempotence
+- Concurrent-migration serialization
+- Ruff (Pyflakes rules only, deliberately)
+- Wheel build
+- Compose config validation
+- `.env.example` ↔ `docs/environment-variables.md` inventory consistency
+- An assertion that CI holds **no** Railway credentials
+- Startup and protected-endpoint smoke tests
+- Full Codespaces workflow, dashboard boot, `/healthz` and `/readyz` probes
+- 40 browser role/state/width checks with artifacts
 
-```python
-source_persistence = persist_kalshi_snapshot(
-    payload,
-    worker_name="paper-dashboard-refresh",
-)
-```
-
-The hosted refresh runs every 300 seconds, which is the same cadence
-`kalshi-market-ingestion` is specified at. So the 1.12 GB of `kalshi_public_api`
-payload bodies measured in production came from the dashboard, not from the
-worker named after the job.
-
-This matters before anyone "fixes" the missing service. The worker persists
-under `worker_name="kalshi-market-ingestion"` with a cadence idempotency key;
-the dashboard persists under `paper-dashboard-refresh` with none. Uniqueness on
-`raw.source_payloads` is `(batch_id, source_identifier, content_hash)` and every
-cycle opens a new batch, so the two would **not** deduplicate against each
-other. Connecting a source to `KalshiIngestionProduction` while the dashboard
-keeps refreshing would roughly double the payload growth rate that filled the
-volume in the first place.
-
-## Configuration drift between repository and deployment
-
-| Setting | `railway.json` | Live service |
-| --- | --- | --- |
-| Builder | `NIXPACKS` | `RAILPACK` |
-| Start command | `service-start` | `paper --host 0.0.0.0 --port ${PORT:-8000}` |
-| Healthcheck | `/healthz`, 300 s | none configured |
-| Pre-deploy | `database-migrate` | applied (this is what fails) |
-
-The public domain routes to **port 8080** while the start command falls back to
-**8000** when `PORT` is unset, and `PORT` is not among the service's variables.
-`Procfile` and `nixpacks.toml` describe a third start command again, with a
-900-second refresh where the live service uses 300.
-
-Four files describe how to start this application and no two agree. Only
-`railway.json`'s pre-deploy command is demonstrably reaching production.
-
-## CI and deployment path
-
-`.github/workflows/ci.yml` runs on pull requests and pushes to `Master`: a
-browser job (Playwright/Chromium against the dashboard) and a `validate` job
-that lints, builds a wheel, applies migrations twice, serializes concurrent
-migrators, runs the endpoint smoke tests, and executes the Codespaces workflow
-end to end against a PostgreSQL service container.
-
-The workflow deliberately asserts that CI holds no hosted credentials:
-
-```yaml
-- name: Verify CI cannot target hosted infrastructure
-  run: |
-    test -z "${RAILWAY_TOKEN:-}"
-    test -z "${RAILWAY_API_TOKEN:-}"
-```
-
-**Deployment does not wait for any of it.** Railway's GitHub integration is
-configured with `checkSuites: false` on every service, so a push to `Master`
-starts a deploy immediately and in parallel with CI. A red build does not stop a
-release.
+What it did **not** have before this change: any deployment step, any dependency
+vulnerability scanning, and any secret scanning.
 
 ## Security posture
 
+Audited this session. No committed secrets were found.
+
 | Check | Result |
 | --- | --- |
-| Secrets committed to the repository | none found; `.gitignore` covers `.env`, `.env.*`, `*.pem`, `*.key`, `data/secrets/` |
-| Secret-shaped strings in tracked files | only `hawknetic_ci:hawknetic_ci_only@127.0.0.1` — a throwaway CI service-container credential |
-| Repository visibility | **public** |
-| Runtime dependency surface | two packages (`psycopg`, `psycopg_pool`) |
-| Dependency update automation | **none** before this audit |
-| Secrets in CI | none, asserted by the workflow itself |
-| Provider credentials in this session | Railway via OAuth, values returned redacted |
-| Structured logs | `test_structured_logs_omit_secret_named_fields` guards against leaking secret-named fields |
-| Dashboard auth | `DASHBOARD_REQUIRE_AUTH_WHEN_HOSTED` enforced; CI asserts a hosted dashboard demands auth |
+| Credentials in tracked files | None. `.env.example` holds placeholders only |
+| `.env`, `*.pem`, `*.key` in history | Never committed (only `.env.example`) |
+| Hardcoded provider hostnames | None |
+| Session cookies | `HttpOnly`, `SameSite=Strict`, `Secure` when hosted |
+| CSRF | Separate non-`HttpOnly` token cookie, `SameSite=Strict` |
+| Default bind address | `127.0.0.1`; `0.0.0.0` only in the hosted role |
+| Hosted auth | `DASHBOARD_REQUIRE_AUTH_WHEN_HOSTED=true` |
+| Execution safety | `RESEARCH_ONLY=true`, live execution/auto-trade/upload all default false |
+| Dependency scanning | **Was missing.** Added in `security.yml` |
+| Secret scanning | **Was missing.** Added in `security.yml` |
 
-The public repository and the deliberate absence of deploy credentials in CI are
-a coherent pair, and worth preserving: any move to workflow-driven deployment
-would put production database credentials into a public repository's secrets.
+The research-only posture is enforced in CI as required environment, not merely
+documented.
 
-## Local development
+## Unresolved
 
-`compose.yml` provides PostgreSQL 18 and `scripts/local.sh` drives it. Before
-this audit, `local.sh` exited 127 without Docker, so every command — including
-running tests — required a container runtime.
+These cannot be closed from the repository. Run `scripts/railway_inventory.sh`.
 
-The full suite was verified during this audit against a system PostgreSQL with
-no Docker at all: **1047 tests, 128 seconds**. Docker is a convenience for this
-project, not a requirement.
+1. **Which workers are deployed.** `docs/railway-worker-services.md` records that
+   production runs only `web` and `kalshi-market-ingestion`.
+   `docs/sports-data-upload.md` records `SportsResearchProduction`,
+   `RawRetentionProduction` and `SettlementWorkerProduction` running, with five
+   consecutive hourly cycles tabulated. Both cannot be true. This drives the cost
+   estimate more than any other single fact, which is why the estimate below is a
+   range rather than a number.
+2. **Whether the staging environment is still running.** A staging PostgreSQL with
+   its own volume is recorded. If it is always-on it is plausibly the largest
+   single line on the bill, and it is the first thing to check.
+3. **Actual metered usage.** Railway reports per-service usage in the dashboard.
+   Nothing in the repository can substitute for reading it.
+4. **Whether production is still disconnected from the repository.** Recorded as
+   true on 2026-08-03. If still true, no merge has deployed itself since.
+
+## Estimated current cost
+
+Railway rates: **$20/vCPU/month, $10/GB RAM/month, $0.15/GB-month volume,
+$0.05/GB egress**, metered per second except egress and storage. Hobby is $5/month
+including $5 of usage; Pro is $20/seat including $20.
+
+Because item 1 above is unresolved, both readings are priced:
+
+| Line | If all 8 workers run | If only web + kalshi run |
+| --- | ---: | ---: |
+| Worker memory | ~0.64 GB → $6.40 | ~0.08 GB → $0.80 |
+| Web memory | ~0.15 GB → $1.50 | $1.50 |
+| PostgreSQL memory | ~0.25 GB → $2.50 | $2.50 |
+| CPU (I/O-bound, bursty) | ~0.15–0.4 vCPU → $3–8 | ~0.05–0.1 vCPU → $1–2 |
+| Volume (0.78 GB) | $0.12 | $0.12 |
+| Egress | $0.05–0.25 | $0.05–0.25 |
+| **Resource subtotal** | **~$14–19/month** | **~$6–7/month** |
+| Plus a staging environment, if running | +$5–10 | +$5–10 |
+
+Add the plan fee, less its included credit. **A realistic total today is $5–30/month**,
+and the width of that range is itself the finding: it is set by unresolved items 1
+and 2, not by measurement error.
+
+## Where the money actually goes
+
+Sorted by what a change would be worth, largest first:
+
+1. **A staging environment left running.** Potentially the biggest line, and pure
+   waste when idle. Verify first.
+2. **Five hourly-or-slower workers held resident.** ~$4/month of memory bought to
+   sleep. Fixable now with `HAWKNETIC_SERVICE_MODE=once`.
+3. **CPU during collection cycles.** Real work; not waste. Do not optimise this by
+   collecting less.
+4. **PostgreSQL.** Small and load-bearing. See `TARGET_INFRASTRUCTURE.md` for why
+   moving it to Neon would cost *more*, not less.
+5. **Volume and egress.** ~$0.15/month combined. Ignore.

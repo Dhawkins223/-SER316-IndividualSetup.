@@ -2,6 +2,13 @@
 
 The web service runs the dashboard only. Configure existing worker entry points independently for Kalshi ingestion, external sources, crypto research, sports research, settlement, and reporting as reliability needs require.
 
+A worker does not have to be always-on. `HAWKNETIC_SERVICE_MODE=once` runs a
+single cycle and exits, which makes the worker deployable as a Railway cron
+service that costs its execution rather than its residency. Five of the eight
+workers run hourly or slower and are better shaped that way; the per-service
+recommendation and the cutover procedure are in `docs/DEPLOYMENT.md`. The default
+remains `loop`, so an existing service is unaffected.
+
 The source-backed player/team/Polymarket catalog and pregame refresh coordinator
 are separate one-shot Railway cron services. Their commands, cadence, API
 contract, and deployment gate are documented in `docs/cloud-source-data.md`.
@@ -52,7 +59,13 @@ until someone looks at Railway.
 Both cannot be true. The second carries measured cycles and is the later of the
 two, which makes it the more likely, but "more likely" is not a deployment
 record. Settle it by reading the service list, then delete the losing claim
-rather than softening it:
+rather than softening it.
+
+`scripts/railway_inventory.sh` does both halves of that in one command: it lists
+the services and reports the `ops.worker_status` rows below, read-only, printing
+variable names without their values. It is also what closes the cost question in
+`docs/INFRASTRUCTURE_COSTS.md`, whose estimate is a range only because this
+disagreement is open.
 
 ```sql
 SELECT worker_name, status, consecutive_failures, last_error_code, heartbeat_at
