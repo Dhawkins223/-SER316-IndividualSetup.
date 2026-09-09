@@ -293,6 +293,25 @@ wait_for_database() {
     # is not a wait for a container that takes seconds to accept connections.
     sleep 2
   done
+  compose_test_database_ready
+}
+
+# The Compose image creates POSTGRES_DB on first boot and nothing else, so the
+# separate test database has to be made here -- `test`, `test-integration` and
+# `verify` all connect to it, and without this they fail with
+# `database "hawknetic_test" does not exist`.
+#
+# The name never reaches SQL: the query is a constant, the match is a
+# fixed-string whole-line compare in the shell, and `createdb` takes the name as
+# an argv. (`psql -c` does not interpolate `:'var'` -- only stdin and -f do --
+# so a parameterised lookup here would be a silent syntax error.)
+compose_test_database_ready() {
+  if "${compose[@]}" exec -T postgres psql -U "$postgres_user" -d postgres -tAXc \
+      'SELECT datname FROM pg_database' 2>/dev/null \
+      | tr -d '\r' | grep -Fxq "$test_database"; then
+    return 0
+  fi
+  "${compose[@]}" exec -T postgres createdb -U "$postgres_user" "$test_database"
 }
 
 db_start() {
