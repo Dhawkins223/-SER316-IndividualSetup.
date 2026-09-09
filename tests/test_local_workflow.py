@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -61,7 +62,13 @@ class LocalScriptTestCase(unittest.TestCase):
     def _run(self, command: str, **overrides: str) -> subprocess.CompletedProcess[str]:
         # GitHub-hosted runners have Docker in /usr/bin, while the minimal
         # execution environment used during development does not. Build the
-        # PATH this test needs instead of assuming anything about the host.
+        # PATH this test needs instead of assuming anything about the host:
+        # everything the script legitimately calls, and deliberately not
+        # `docker`, which is the condition under test.
+        #
+        # These are resolved rather than hardcoded to /usr/bin because the
+        # interpreter that matters is whichever `python3` the job installed the
+        # package into -- on a runner that is under /opt/hostedtoolcache.
         with tempfile.TemporaryDirectory() as tmp:
             bin_dir = self._bin_dir(tmp)
             env = {
@@ -97,8 +104,8 @@ class LocalWorkflowEntrypointTests(LocalScriptTestCase):
         self.assertNotIn("POSTGRES_PASSWORD", result.stderr)
         self.assertNotIn("Docker is required", result.stderr)
 
-    def test_database_workflow_explains_the_missing_canonical_runtime(self) -> None:
-        result = self._run("test")
+    def test_requiring_compose_without_docker_names_both_ways_out(self) -> None:
+        result = self._run("db-start", HAWKNETIC_LOCAL_DB="compose")
 
         self.assertEqual(result.returncode, 127)
         self.assertIn("Docker is required", result.stderr)
@@ -293,6 +300,23 @@ class ExternalDatabaseConnectionTests(LocalScriptTestCase):
         )
 
         self.assertNotIn("command not found", result.stderr)
+
+    def test_without_docker_it_falls_back_to_an_external_server(self) -> None:
+        # No Docker on PATH and nothing listening: the workflow should explain
+        # how to point it at a running PostgreSQL rather than demand a
+        # container runtime.
+        result = self._run("db-start")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("command not found", result.stderr)
+        self.assertIn("POSTGRES_HOST", result.stderr)
+        self.assertIn("already running", result.stderr)
+
+    def test_an_unknown_database_mode_is_refused(self) -> None:
+        result = self._run("db-start", HAWKNETIC_LOCAL_DB="sometimes")
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("Unknown HAWKNETIC_LOCAL_DB mode: sometimes", result.stderr)
 
 
 class RecursionGuardTests(LocalScriptTestCase):

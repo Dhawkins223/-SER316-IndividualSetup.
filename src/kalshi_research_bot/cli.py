@@ -76,6 +76,8 @@ from .evaluation.model_audit import (
 )
 from .pipeline import ResearchPipeline
 from .retention import (
+    DEFAULT_RETENTION_DAYS,
+    MINIMUM_RETENTION_DAYS,
     RetentionWindowTooShort,
     prune_source_payload_bodies,
     render_storage_report,
@@ -1693,7 +1695,15 @@ def build_parser() -> argparse.ArgumentParser:
         "raw-retention",
         help="report raw payload storage and age out payload bodies past a window",
     )
-    raw_retention.add_argument("--older-than-days", type=int, default=30, help="retention window in days (minimum 7)")
+    # Defaulted from the module rather than repeated here. This argument said 30
+    # while the module said 30 and production ran 10, and a window that disagrees
+    # with itself in three places is how the volume filled with nobody wrong.
+    raw_retention.add_argument(
+        "--older-than-days",
+        type=int,
+        default=DEFAULT_RETENTION_DAYS,
+        help=f"retention window in days (default {DEFAULT_RETENTION_DAYS}, minimum {MINIMUM_RETENTION_DAYS})",
+    )
     raw_retention.add_argument("--source", default=None, help="limit to one collection source")
     raw_retention.add_argument("--limit", type=int, default=5000, help="maximum rows pruned in one pass")
     raw_retention.add_argument("--apply", action="store_true", help="write the changes; omit for a dry run")

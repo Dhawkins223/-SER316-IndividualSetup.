@@ -39,7 +39,7 @@ Useful commands:
 ./scripts/local.sh stop
 ```
 
-`db-reset` destroys only the Codespace Compose volume and requires the explicit
+`db-reset` destroys only this project's local database and requires the explicit
 `RESET` confirmation. It never contacts Railway.
 
 ### Developing without Docker

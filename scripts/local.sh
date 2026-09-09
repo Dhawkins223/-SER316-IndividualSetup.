@@ -146,6 +146,23 @@ else
   python_bin="python3"
 fi
 
+# A password is not a URL component until it is escaped. `p@ss/word` splices a
+# new host and path into the connection string and either fails to parse or,
+# worse, parses as something else entirely. Byte-wise under LC_ALL=C so that
+# multi-byte characters encode per byte, which is what percent-encoding means.
+uri_encode() {
+  local raw="$1" out="" index char
+  local LC_ALL=C
+  for (( index = 0; index < ${#raw}; index++ )); do
+    char="${raw:index:1}"
+    case "$char" in
+      [A-Za-z0-9._~-]) out+="$char" ;;
+      *) printf -v char '%%%02X' "'$char"; out+="$char" ;;
+    esac
+  done
+  printf '%s' "$out"
+}
+
 database_url() {
   local database_name="$1"
   if [[ "$database_mode" == "external" ]]; then
@@ -272,12 +289,6 @@ wait_for_database() {
       echo "Local PostgreSQL did not become healthy." >&2
       return 1
     fi
-    sleep 2
-  done
-  if ! "${compose[@]}" exec -T postgres psql -U "$postgres_user" -d postgres -tAc \
-      "SELECT 1 FROM pg_database WHERE datname = '$test_database'" | grep -q 1; then
-    "${compose[@]}" exec -T postgres psql -U "$postgres_user" -d postgres -c \
-      "CREATE DATABASE \"$test_database\"" >/dev/null
   fi
 }
 
@@ -372,7 +383,41 @@ case "$command_name" in
     compose_only "reset"
     read -r -p "Delete only the local PostgreSQL volume? Type RESET to continue: " confirmation
     [[ "$confirmation" == "RESET" ]] || { echo "Local database reset cancelled."; exit 1; }
-    "${compose[@]}" down -v
+    if [[ "$db_mode" == "compose" ]]; then
+      "${compose[@]}" down -v
+    else
+      # Dropping databases on a server this script did not start is a much
+      # larger blast radius than deleting a Compose volume, and POSTGRES_HOST
+      # is one typo away from a server that matters. Loopback is the only
+      # target that is self-evidently a development database; anything else
+      # has to be claimed explicitly.
+      case "$postgres_host" in
+        127.0.0.1|localhost|::1|"") ;;
+        *)
+          if [[ "${HAWKNETIC_ALLOW_EXTERNAL_RESET:-}" != "1" ]]; then
+            echo "Refusing to drop databases on non-local host '$postgres_host'." >&2
+            echo "This would DROP \"$app_database\" and \"$test_database\" there. If that is really a development server, re-run with HAWKNETIC_ALLOW_EXTERNAL_RESET=1." >&2
+            exit 2
+          fi
+          ;;
+      esac
+      DATABASE_RESET_URL="$(database_url postgres)" \
+      DATABASE_RESET_NAMES="$app_database,$test_database" \
+      "$python_bin" - <<'PY'
+import os
+
+import psycopg
+from psycopg import sql
+
+url = os.environ["DATABASE_RESET_URL"]
+names = [name for name in os.environ["DATABASE_RESET_NAMES"].split(",") if name]
+with psycopg.connect(url, connect_timeout=5, autocommit=True) as connection:
+    for name in names:
+        connection.execute(
+            sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(name))
+        )
+PY
+    fi
     db_start
     ;;
   migrate)

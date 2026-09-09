@@ -30,7 +30,9 @@ given `DATABASE_URL` or `POSTGRES_PASSWORD` from Railway.
 | `DASHBOARD_HOST` | LOCAL/CODESPACE | NON-SECRET | Local launcher bind address. Codespaces sets `0.0.0.0`; the default remains loopback. |
 | `PORT` | LOCAL/CODESPACE, STAGING, PRODUCTION | NON-SECRET | Dashboard or worker health server port. Railway supplies it when hosted. |
 | `RESEARCH_DATA_DIR` | LOCAL/CODESPACE | NON-SECRET | Optional local generated-data directory. |
-| `POSTGRES_USER`, `POSTGRES_DB`, `POSTGRES_TEST_DB`, `POSTGRES_PORT` | LOCAL/CODESPACE, CI | NON-SECRET | Compose and test database names/port. Railway supplies its own connection URL instead. |
+| `POSTGRES_USER`, `POSTGRES_DB`, `POSTGRES_TEST_DB`, `POSTGRES_PORT`, `POSTGRES_HOST` | LOCAL/CODESPACE, CI | NON-SECRET | Compose and test database names/port/host. Railway supplies its own connection URL instead. |
+| `HAWKNETIC_LOCAL_DB` | LOCAL/CODESPACE | NON-SECRET | Where `scripts/local.sh` gets PostgreSQL: `auto` (default), `compose`, or `external`. |
+| `HAWKNETIC_ALLOW_EXTERNAL_RESET` | LOCAL/CODESPACE | NON-SECRET | Set to `1` to permit `local.sh db-reset` to drop databases on a non-loopback host. Refused without it. |
 | `DATABASE_POOL_MIN_SIZE`, `DATABASE_POOL_MAX_SIZE`, `DATABASE_CONNECT_TIMEOUT`, `DATABASE_STATEMENT_TIMEOUT`, `DATABASE_MIGRATION_STATEMENT_TIMEOUT`, `DATABASE_MIGRATION_MODE` | LOCAL/CODESPACE, CI, STAGING, PRODUCTION | NON-SECRET | PostgreSQL pool, timeout, and forward-only migration controls. |
 | `POSTGRES_PARITY_VALIDATED`, `RAILWAY_STAGING_VALIDATED`, `RAILWAY_BACKUP_VERIFIED`, `RAILWAY_VOLUME_HEALTHY` | STAGING, PRODUCTION | NON-SECRET | Explicit readiness evidence flags. They stay false until independently verified. |
 | `RAILWAY_ENVIRONMENT`, `RAILWAY_ENVIRONMENT_ID`, `RAILWAY_PROJECT_ID`, `RAILWAY_SERVICE_ID`, `RAILWAY_PUBLIC_DOMAIN`, `RAILWAY_GIT_COMMIT_SHA`, `RAILWAY_REPLICA_ID` | STAGING, PRODUCTION | NON-SECRET | Railway-provided or operator-set deployment identity. IDs and the public domain are metadata, not API tokens. |
@@ -57,7 +59,8 @@ limits and PostgreSQL storage.
 | `SETTLEMENT_MAX_MARKETS_PER_RUN`, `SETTLEMENT_HTTP_TIMEOUT_SECONDS`, `SETTLEMENT_MAX_CONSECUTIVE_FETCH_ERRORS` | Settlement worker batch and failure limits. |
 | `KALSHI_RUNTIME_CLEANUP_ENABLED` | Enables bounded local runtime-cache cleanup. |
 | `SPORTS_SOURCE_MODE`, `SPORTS_SCRAPER_ENABLED`, `SPORTS_RETRIEVAL_PLAN`, `SPORTS_SOURCE_TIMEOUT_SECONDS`, `SPORTS_MAX_SUMMARY_REQUESTS`, `SPORTS_FINALS_LOOKBACK_DAYS` | Sports source selection, request bounds, and finals lookback. |
-| `RAW_RETENTION_DAYS`, `RAW_RETENTION_BATCH_LIMIT`, `RAW_RETENTION_DRY_RUN`, `RAW_RETENTION_DUPLICATION_CENSUS` | Raw-payload retention and measurement. Production changes require the readiness gate; the template defaults to dry-run. |
+| `RAW_RETENTION_DAYS`, `RAW_RETENTION_BATCH_LIMIT`, `RAW_RETENTION_DRY_RUN`, `RAW_RETENTION_DUPLICATION_CENSUS` | Raw-payload retention and measurement. Production changes require the readiness gate; the template defaults to dry-run. The window sets the table's steady-state size, so compute it from the volume size and measured growth — see `docs/raw-payload-retention.md`. |
+| `DATABASE_VOLUME_CAPACITY_BYTES` | Volume ceiling the database runs against. Drives the `database_capacity` anomaly: warning at 75%, critical at 90%. Defaults to 5 GB, Railway's Hobby volume size. |
 | `EXTERNAL_SOURCES_CONFIG` | Repository-relative configuration for the optional external-source worker. |
 
 ## Dashboard, authentication, integrations, and runtime roles

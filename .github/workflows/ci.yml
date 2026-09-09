@@ -9,6 +9,14 @@ on:
 permissions:
   contents: read
 
+# One run per branch. Pushing twice in a minute used to leave both runs going,
+# and this workflow starts a PostgreSQL service and a Chromium download in
+# every one of them -- superseded runs are answering a question nobody is
+# waiting for, on minutes that are metered.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   browser:
     runs-on: ubuntu-24.04
