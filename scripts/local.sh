@@ -305,13 +305,23 @@ wait_for_database() {
 # fixed-string whole-line compare in the shell, and `createdb` takes the name as
 # an argv. (`psql -c` does not interpolate `:'var'` -- only stdin and -f do --
 # so a parameterised lookup here would be a silent syntax error.)
+#
+# `grep -Fx ... >/dev/null` rather than `grep -Fxq`: -q exits on the first
+# match, and under `set -o pipefail` the SIGPIPE that gives psql becomes the
+# pipeline's status (141). The lookup would then report an existing database as
+# absent and `createdb` would fail on it -- intermittently, once the catalog is
+# long enough that psql is still writing when grep leaves.
+#
+# `--` before the name in both commands: a database name may legitimately begin
+# with a hyphen, and without it grep and createdb would each read one as an
+# option.
 compose_test_database_ready() {
   if "${compose[@]}" exec -T postgres psql -U "$postgres_user" -d postgres -tAXc \
       'SELECT datname FROM pg_database' 2>/dev/null \
-      | tr -d '\r' | grep -Fxq "$test_database"; then
+      | tr -d '\r' | grep -Fx -- "$test_database" >/dev/null; then
     return 0
   fi
-  "${compose[@]}" exec -T postgres createdb -U "$postgres_user" "$test_database"
+  "${compose[@]}" exec -T postgres createdb -U "$postgres_user" -- "$test_database"
 }
 
 db_start() {
