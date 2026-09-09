@@ -27,7 +27,7 @@ jobs:
       SMOKE: "1"
       SMOKE_ARTIFACT_DIR: /tmp/hawknetic-browser
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -86,7 +86,7 @@ jobs:
       STALE_CACHE_AS_FRESH: "false"
       DASHBOARD_REQUIRE_AUTH_WHEN_HOSTED: "true"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"

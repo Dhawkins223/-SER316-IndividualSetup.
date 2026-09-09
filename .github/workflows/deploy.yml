@@ -90,7 +90,7 @@ jobs:
       WORKER_SERVICES: ${{ vars.RAILWAY_WORKER_SERVICES }}
       ONLY_SERVICE: ${{ inputs.service }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # workflow_run checks out the default branch by default, which is not
           # necessarily the commit that passed validation.
