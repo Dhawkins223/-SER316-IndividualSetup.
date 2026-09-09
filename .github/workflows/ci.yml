@@ -99,7 +99,14 @@ jobs:
       - name: Validate cloud development configuration
         run: |
           python -m json.tool .devcontainer/devcontainer.json >/dev/null
-          bash -n .devcontainer/*.sh scripts/local.sh
+          # One file per invocation. `bash -n a.sh b.sh` parses only a.sh and
+          # passes the rest as positional parameters, so this gate silently
+          # checked nothing but the first .devcontainer script -- which is how a
+          # syntax error in scripts/local.sh reached Master.
+          for script in .devcontainer/*.sh scripts/local.sh; do
+            echo "syntax check: $script"
+            bash -n "$script"
+          done
           python - <<'PY'
           import re
           from pathlib import Path

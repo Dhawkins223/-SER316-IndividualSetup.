@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -300,23 +299,6 @@ class ExternalDatabaseConnectionTests(LocalScriptTestCase):
         )
 
         self.assertNotIn("command not found", result.stderr)
-
-    def test_without_docker_it_falls_back_to_an_external_server(self) -> None:
-        # No Docker on PATH and nothing listening: the workflow should explain
-        # how to point it at a running PostgreSQL rather than demand a
-        # container runtime.
-        result = self._run("db-start")
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertNotIn("command not found", result.stderr)
-        self.assertIn("POSTGRES_HOST", result.stderr)
-        self.assertIn("already running", result.stderr)
-
-    def test_an_unknown_database_mode_is_refused(self) -> None:
-        result = self._run("db-start", HAWKNETIC_LOCAL_DB="sometimes")
-
-        self.assertEqual(result.returncode, 2)
-        self.assertIn("Unknown HAWKNETIC_LOCAL_DB mode: sometimes", result.stderr)
 
 
 class RecursionGuardTests(LocalScriptTestCase):

@@ -289,7 +289,10 @@ wait_for_database() {
       echo "Local PostgreSQL did not become healthy." >&2
       return 1
     fi
-  fi
+    # Without this the thirty attempts are spent in a few milliseconds, which
+    # is not a wait for a container that takes seconds to accept connections.
+    sleep 2
+  done
 }
 
 db_start() {
