@@ -34,6 +34,8 @@ given `DATABASE_URL` or `POSTGRES_PASSWORD` from Railway.
 | `DATABASE_POOL_MIN_SIZE`, `DATABASE_POOL_MAX_SIZE`, `DATABASE_CONNECT_TIMEOUT`, `DATABASE_STATEMENT_TIMEOUT`, `DATABASE_MIGRATION_STATEMENT_TIMEOUT`, `DATABASE_MIGRATION_MODE` | LOCAL/CODESPACE, CI, STAGING, PRODUCTION | NON-SECRET | PostgreSQL pool, timeout, and forward-only migration controls. |
 | `POSTGRES_PARITY_VALIDATED`, `RAILWAY_STAGING_VALIDATED`, `RAILWAY_BACKUP_VERIFIED`, `RAILWAY_VOLUME_HEALTHY` | STAGING, PRODUCTION | NON-SECRET | Explicit readiness evidence flags. They stay false until independently verified. |
 | `RAILWAY_ENVIRONMENT`, `RAILWAY_ENVIRONMENT_ID`, `RAILWAY_PROJECT_ID`, `RAILWAY_SERVICE_ID`, `RAILWAY_PUBLIC_DOMAIN`, `RAILWAY_GIT_COMMIT_SHA`, `RAILWAY_REPLICA_ID` | STAGING, PRODUCTION | NON-SECRET | Railway-provided or operator-set deployment identity. IDs and the public domain are metadata, not API tokens. |
+| `HAWKNETIC_DATABASE_URL`, `HAWKNETIC_TEST_DATABASE_URL` | LOCAL/CODESPACE | SECRET | Set both to run `scripts/local.sh` against a managed development database instead of Compose, which removes the local Docker requirement. They must resolve to different databases — the script asks each server for `current_database()` and its address, so two URLs differing only in credentials or options are refused — and a Railway or Render host is refused unless `HAWKNETIC_ALLOW_HOSTED_DATABASE` is set. Never point either at staging or production. |
+| `HAWKNETIC_ALLOW_HOSTED_DATABASE` | LOCAL/CODESPACE | NON-SECRET | Escape hatch that disables the hosted-host refusal above. Set it only for a database you are certain is disposable. |
 
 ## Source and collection configuration
 
@@ -77,6 +79,7 @@ Hosted auth and integrations must be enabled deliberately, per environment.
 | `CRYPTO_RUN_ID`, `SPORTS_RUN_ID`, `KALSHI_RUN_ID` | Research lineage identifiers. |
 | `BOT_COMPANY_ENABLED` | Private bot-company orchestration switch. |
 | `HAWKNETIC_SERVICE` | Selects the single web role or one documented always-on worker role. |
+| `HAWKNETIC_SERVICE_MODE` | `loop` (default) keeps a worker running with its own cadence; `once` runs a single cycle and exits so the worker can be a scheduled, scale-to-zero Railway cron service. Ignored by the `web` role. An unrecognised value logs and falls back to `loop`. |
 
 ## Research-only safety and intentionally disabled connectors
 
