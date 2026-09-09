@@ -106,15 +106,26 @@ the table and `VACUUM FULL` is what returns it to the filesystem — and
    this point deletes data. Manual backups are capped at 50% of volume size,
    which is why the resize comes first.
 
-3. **Verify the application recovers.** The three workers and the web service
-   should stop crash-looping on their own once
-   `postgres-gxqb.railway.internal` resolves again. Redeploy
-   `HawkNeticSportsTools` if its pre-deploy migration does not retry, and check:
+3. **Redeploy the application — it will not come back by itself.** Nothing in
+   production is running to recover: on 2026-09-08 at 16:18 UTC all three
+   workers were stopped (a clean SIGTERM, logged as `worker_stopped`, after
+   `consecutive_crashes` reached 11 against the missing database), and their
+   deployments are `REMOVED`. The web service's last deployment is `FAILED`.
+   A removed deployment does not restart when its dependency returns.
+
+   So redeploy each of `HawkNeticSportsTools`, `SportsResearchProduction`,
+   `SettlementWorkerProduction` and `RawRetentionProduction` once
+   `postgres-gxqb.railway.internal` resolves again. Redeploy rebuilds from the
+   same commit; there is nothing to roll back to. Then check:
 
    ```
    GET /healthz   → {"status": "ok"}
    GET /readyz    → database.ready: true
    ```
+
+   `RawRetentionProduction` picks up the `RAW_RETENTION_DAYS=10` and
+   `RAW_RETENTION_DRY_RUN=false` variables on this deploy — they were set with
+   `skipDeploys`, so this is when they take effect.
 
 4. **Prune, in bounded passes.** `RawRetentionProduction` already has
    `RAW_RETENTION_DAYS=10` and `RAW_RETENTION_DRY_RUN=false` set (applied by the
@@ -159,8 +170,14 @@ the table and `VACUUM FULL` is what returns it to the filesystem — and
 
 ### Deleting the two obsolete staging databases
 
-Worth **$25.38/month** — the largest single saving available in this account —
-but it destroys data that could not be inspected during the audit.
+Worth **$25.38/month** once they are running again — the largest saving in this
+account at its normal run rate — but it destroys data that could not be
+inspected during the audit.
+
+As of 2026-09-09 both are stopped, so today they cost only their volumes,
+$1.50/month between them. That lowers the urgency, not the conclusion: they back
+services that have not deployed successfully since July and August, and if
+anything ever restarts them the $25.38 comes back with them.
 
 `Postgres` (staging, us-west2, 4.994 GB) and `Postgres-GDG0` (staging, iad,
 4.987 GB) back `HawkNeticResearchStaging` (last successful deploy: never, FAILED

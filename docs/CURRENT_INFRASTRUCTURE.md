@@ -35,6 +35,48 @@ The three workers report deployment status `SUCCESS`. They are not healthy —
 they are crash-looping. A `SUCCESS` deployment means the container started, not
 that the process inside it is doing anything.
 
+### Update, 2026-09-09: everything is now stopped
+
+Re-measured a day later. The crash-looping ended, and not by recovering:
+
+| Service | Then (2026-09-08) | Now (2026-09-09) |
+| --- | --- | --- |
+| `SportsResearchProduction` | crash-looping | stopped 16:18:16 UTC, deployment `REMOVED` |
+| `SettlementWorkerProduction` | crash-looping | stopped 16:18:17 UTC, deployment `REMOVED` |
+| `RawRetentionProduction` | crash-looping | stopped 16:18:18 UTC, deployment `REMOVED` |
+| `HawkNeticSportsTools` | failing every deploy | unchanged, last deployment still `FAILED` |
+| `Postgres-gxQB` | stopped, cannot restart | unchanged, 4.99 GB still on the volume |
+| `postgres` (`ravishing-elegance`) | idle, 0.046 GB RAM | 0 GB RAM — stopped as well |
+
+The workers went down cleanly rather than crashing — a SIGTERM, then
+`worker_stopped` in their own logs, after `consecutive_crashes` reached 11.
+All three within 1.5 seconds, which makes it one action rather than three
+failures. Whether that was the account owner or Railway reclaiming a workload
+that had been failing for 40 minutes is not visible from the API.
+
+**Nothing in either project is running now.** Every compute metric reads 0 and
+only volumes remain, which bills at:
+
+| Volume | Used | Monthly |
+| --- | ---: | ---: |
+| `Postgres-gxQB` | 4.995 GB | $0.75 |
+| `Postgres` (staging) | 4.995 GB | $0.75 |
+| `Postgres-GDG0` (staging) | 4.987 GB | $0.75 |
+| `HawkNeticSportsTools` `/data` | 0.769 GB | $0.12 |
+| `postgres` (`ravishing-elegance`) | 0.184 GB | $0.03 |
+| **Total** | **15.93 GB** | **$2.39** |
+
+That is under Hobby's $5 included usage, so the bill is now just the $5
+subscription — the cheapest this account has been, and only because none of it
+works. It also means the two obsolete staging databases now cost $1.50/month
+rather than the $25.38/month they cost while running: deleting them is still
+right, but it is no longer the urgent saving. Recovering the production
+database is.
+
+One operational consequence: a `REMOVED` deployment does not restart when its
+dependency comes back. The workers will not return on their own once PostgreSQL
+is running — they have to be redeployed. `docs/ROLLBACK.md` step 3 covers it.
+
 ## Providers in use
 
 | Provider | Role today | Authenticated for this audit |
