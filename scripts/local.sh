@@ -289,6 +289,12 @@ wait_for_database() {
       echo "Local PostgreSQL did not become healthy." >&2
       return 1
     fi
+    sleep 2
+  done
+  if ! "${compose[@]}" exec -T postgres psql -U "$postgres_user" -d postgres -tAc \
+      "SELECT 1 FROM pg_database WHERE datname = '$test_database'" | grep -q 1; then
+    "${compose[@]}" exec -T postgres psql -U "$postgres_user" -d postgres -c \
+      "CREATE DATABASE \"$test_database\"" >/dev/null
   fi
 }
 
@@ -383,7 +389,7 @@ case "$command_name" in
     compose_only "reset"
     read -r -p "Delete only the local PostgreSQL volume? Type RESET to continue: " confirmation
     [[ "$confirmation" == "RESET" ]] || { echo "Local database reset cancelled."; exit 1; }
-    if [[ "$db_mode" == "compose" ]]; then
+    if [[ "$database_mode" == "compose" ]]; then
       "${compose[@]}" down -v
     else
       # Dropping databases on a server this script did not start is a much
