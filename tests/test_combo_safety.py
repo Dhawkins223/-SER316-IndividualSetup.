@@ -5,6 +5,7 @@ from kalshi_research_bot.combo_safety import (
     VERIFIED_COMBO_SOURCE,
     authoritative_combo_slip_rejection_reasons,
     combo_leg_signature,
+    combo_public_quote_state,
     slip_has_authoritative_combo_evidence,
 )
 
@@ -96,6 +97,60 @@ class ComboSafetyTests(unittest.TestCase):
         self.assertIn("combo_leg_count_mismatch", reasons)
         self.assertIn("combo_leg_signature_mismatch", reasons)
         self.assertFalse(slip_has_authoritative_combo_evidence(slip))
+
+
+class ComboPublicQuoteStateTests(unittest.TestCase):
+    """One classifier, used by both the collector and the dashboard.
+
+    It lived in two places -- `today.combo_public_quote_state` stamping the
+    payload and a copy in `paper_server` rendering it -- which is two answers
+    waiting to disagree about the same market. These pin the one that remains.
+    """
+
+    RFQ_BOOK = {
+        "ticker": "KXMVE-RFQ-1",
+        "status": "active",
+        "yes_ask_cents": 0,
+        "yes_bid_cents": 0,
+        "no_ask_cents": 100,
+        "no_bid_cents": 100,
+    }
+
+    def test_the_all_or_nothing_book_is_rfq_required_not_a_zero_price(self):
+        self.assertEqual(combo_public_quote_state(self.RFQ_BOOK), "rfq_required")
+
+    def test_a_real_yes_ask_is_tradable(self):
+        self.assertEqual(combo_public_quote_state({**self.RFQ_BOOK, "yes_ask_cents": 81}), "tradable")
+
+    def test_the_rfq_shape_needs_a_live_kxmve_contract(self):
+        # The same book on a settled contract, or on one that is not a combo,
+        # is not Kalshi withholding a quote.
+        self.assertEqual(combo_public_quote_state({**self.RFQ_BOOK, "status": "settled"}), "unavailable")
+        self.assertEqual(combo_public_quote_state({**self.RFQ_BOOK, "ticker": "KXNFL-1"}), "unavailable")
+
+    def test_a_stamped_state_wins_over_rederiving_it(self):
+        # The collector saw the market when it collected it. A snapshot read
+        # back later must not be re-judged from fields that may have been
+        # normalised since.
+        self.assertEqual(
+            combo_public_quote_state({**self.RFQ_BOOK, "public_quote_state": "tradable"}),
+            "tradable",
+        )
+
+    def test_an_unrecognised_stamp_is_ignored_rather_than_trusted(self):
+        self.assertEqual(
+            combo_public_quote_state({**self.RFQ_BOOK, "public_quote_state": "probably-fine"}),
+            "rfq_required",
+        )
+
+    def test_a_missing_book_is_unavailable_rather_than_rfq_required(self):
+        self.assertEqual(combo_public_quote_state({"ticker": "KXMVE-1", "status": "active"}), "unavailable")
+
+    def test_an_unparseable_quote_is_unavailable(self):
+        self.assertEqual(
+            combo_public_quote_state({**self.RFQ_BOOK, "no_ask_cents": "not-a-number"}),
+            "unavailable",
+        )
 
 
 if __name__ == "__main__":

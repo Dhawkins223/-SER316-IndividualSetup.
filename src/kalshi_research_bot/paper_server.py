@@ -26,7 +26,7 @@ from .auth import (
     session_token_from_cookie,
     user_auth_enabled,
 )
-from .combo_safety import slip_has_authoritative_combo_evidence
+from .combo_safety import combo_public_quote_state, slip_has_authoritative_combo_evidence
 from .dashboard_assets import (
     LOGIN_SCRIPT,
     OPS_SCRIPT,
@@ -1165,44 +1165,13 @@ def render_market_browser(payload: dict) -> str:
     return f'<div class="data-rows">{rows}</div>'
 
 
-def market_public_quote_state(market: dict) -> str:
-    """Whether this exact combo has a public price, needs an RFQ, or has neither.
-
-    The collector records the answer on the market; recomputing it here is the
-    fallback for a snapshot written before it did. An all-or-nothing book on a
-    live KXMVE contract -- nothing bid on YES, NO offered at the full dollar --
-    is not a market priced at zero. It is Kalshi declining to quote the
-    combination publicly, which is a state the row has to name rather than
-    print as `0.00c`.
-    """
-    explicit = str(market.get("public_quote_state") or "").lower()
-    if explicit in {"tradable", "rfq_required", "unavailable"}:
-        return explicit
-    try:
-        yes_ask = float(market.get("yes_ask_cents") or 0)
-        yes_bid = float(market.get("yes_bid_cents") or 0)
-        no_ask = float(market.get("no_ask_cents") or 0)
-        no_bid = float(market.get("no_bid_cents") or 0)
-    except (TypeError, ValueError):
-        return "unavailable"
-    if 0 < yes_ask < 100:
-        return "tradable"
-    if (
-        str(market.get("ticker") or "").upper().startswith("KXMVE")
-        and str(market.get("status") or "").lower() in {"active", "open"}
-        and (yes_ask, yes_bid, no_ask, no_bid) == (0, 0, 100, 100)
-    ):
-        return "rfq_required"
-    return "unavailable"
-
-
 def render_market_browser_row(market: dict) -> str:
     ticker = str(market.get("ticker") or "Unidentified contract")
     title = str(market.get("title") or ticker)
     legs = list(market.get("leg_details") or [])
     leg_count = len(legs) or len(market.get("legs") or [])
     ready = bool(market.get("real_data_ready"))
-    quote_state = market_public_quote_state(market)
+    quote_state = combo_public_quote_state(market)
     if ready and quote_state == "rfq_required":
         status_text = "RFQ required"
         status_class = "warning"
@@ -1210,7 +1179,7 @@ def render_market_browser_row(market: dict) -> str:
         no_quote = "No public quote"
         quote_message = str(
             market.get("public_quote_message")
-            or "Kalshi requires an authenticated RFQ for this exact combo; the public orderbook has no executable price."
+            or "No executable combo price is quoted publicly; this exact combination needs an authenticated Kalshi RFQ before it has one."
         )
     elif ready and quote_state == "tradable":
         status_text = "Verified"

@@ -19,13 +19,17 @@ Every worker uses PostgreSQL-backed idempotency, heartbeat, failure counts, sour
 
 The research-model-refresh worker is the bridge between fresh normalized
 Kalshi market observations and the otherwise-empty research schema. Every hour
-it selects the latest fresh observation for each open market and writes:
+it selects the latest fresh observation for up to `RESEARCH_BASELINE_MAX_MARKETS`
+open markets and writes:
 
 - a code-commit-pinned baseline-only model version;
 - immutable point-in-time feature snapshots;
 - a completed forward prediction run;
-- one zero-edge, no-edge prediction per market; and
-- a sample-size coverage metric.
+- one zero-edge, no-edge prediction per *usable* market -- an open market whose
+  observation carries no valid quote yields no implied probability, so it is
+  skipped rather than predicted at a made-up price; and
+- a sample-size coverage metric, which is what says how many of the open
+  markets those predictions actually cover.
 
 The worker intentionally sets the predicted probability equal to market
 consensus. This establishes complete lineage and gives the platform real
@@ -33,7 +37,10 @@ normalized research data without presenting an exchange quote as an
 independently validated algorithm. A repeat cycle over the same dataset hash is
 a no-op.
 
-Deploy it with railway.worker.json, DATABASE_MIGRATION_MODE=check, and:
+Deploy it with railway.worker.json, `DATABASE_MIGRATION_MODE=check`, and
+`DATABASE_URL` pointing at the same PostgreSQL service the web service uses --
+without it the worker's first connection fails before a refresh can run, and it
+is not inherited unless the project sets it. Then:
 
     HAWKNETIC_SERVICE=research-model-refresh
     RESEARCH_BASELINE_MAX_AGE_SECONDS=1800

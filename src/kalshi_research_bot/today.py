@@ -18,6 +18,8 @@ from .combo_safety import (
     authoritative_combo_leg_rejection_reasons,
     authoritative_combo_slip_rejection_reasons,
     combo_leg_signature,
+    combo_public_quote_state,
+    market_is_tradable,
 )
 from .connectors.http import HttpClient
 from .slip_analysis import (
@@ -1814,36 +1816,6 @@ def fetch_kalshi_combo_markets(http: HttpClient, limit: int = 100) -> list[dict[
         ),
         reverse=True,
     )
-
-
-def market_is_tradable(market: dict[str, Any]) -> bool:
-    ask = market.get("yes_ask_cents")
-    return ask is not None and 0 < ask < 100
-
-
-def combo_public_quote_state(market: dict[str, Any]) -> str:
-    """Classify an exact Kalshi combo without inventing a public executable price."""
-    if market_is_tradable(market):
-        return "tradable"
-    ticker = str(market.get("ticker") or "").upper()
-    status = str(market.get("status") or "").lower()
-    try:
-        yes_ask = float(market.get("yes_ask_cents") or 0)
-        yes_bid = float(market.get("yes_bid_cents") or 0)
-        no_ask = float(market.get("no_ask_cents") or 0)
-        no_bid = float(market.get("no_bid_cents") or 0)
-    except (TypeError, ValueError):
-        return "unavailable"
-    if (
-        ticker.startswith("KXMVE")
-        and status in {"active", "open"}
-        and yes_ask == 0
-        and yes_bid == 0
-        and no_ask == 100
-        and no_bid == 100
-    ):
-        return "rfq_required"
-    return "unavailable"
 
 
 def _yes_spread_cents(market: dict[str, Any]) -> Decimal | None:

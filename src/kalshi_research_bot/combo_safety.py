@@ -9,6 +9,57 @@ VERIFIED_COMBO_EVIDENCE = "listed_kalshi_mve_market"
 VERIFIED_COMBO_SOURCE = "kalshi_public_mve_market"
 
 
+def market_is_tradable(market: dict[str, Any]) -> bool:
+    ask = market.get("yes_ask_cents")
+    return ask is not None and 0 < ask < 100
+
+
+def combo_public_quote_state(market: dict[str, Any]) -> str:
+    """Classify an exact Kalshi combo without inventing a public executable price.
+
+    This lives here rather than in `today.py` because both the collector that
+    stamps `public_quote_state` and the dashboard that renders it need the same
+    answer, and `paper_server` cannot import `today` at module scope without
+    reintroducing the evaluation cycle 4790889 fixed. One copy, in the leaf
+    module they both already import, is what stops the two from drifting.
+
+    A stamped `public_quote_state` wins: the collector saw the market at
+    collection time, and re-deriving from a snapshot that may have been
+    normalised since would second-guess it. Everything below is the fallback
+    for a payload written before the field existed.
+
+    The all-or-nothing book -- nothing bid on YES, NO offered at the full
+    dollar -- is the shape Kalshi leaves on a combination it will not quote
+    publicly. It is inferred from the orderbook, not reported by the API, so
+    what the dashboard says about it stays on the observation ("no executable
+    price is quoted") rather than asserting the exchange's intent.
+    """
+    stamped = str(market.get("public_quote_state") or "").lower()
+    if stamped in {"tradable", "rfq_required", "unavailable"}:
+        return stamped
+    if market_is_tradable(market):
+        return "tradable"
+    ticker = str(market.get("ticker") or "").upper()
+    status = str(market.get("status") or "").lower()
+    try:
+        yes_ask = float(market.get("yes_ask_cents") or 0)
+        yes_bid = float(market.get("yes_bid_cents") or 0)
+        no_ask = float(market.get("no_ask_cents") or 0)
+        no_bid = float(market.get("no_bid_cents") or 0)
+    except (TypeError, ValueError):
+        return "unavailable"
+    if (
+        ticker.startswith("KXMVE")
+        and status in {"active", "open"}
+        and yes_ask == 0
+        and yes_bid == 0
+        and no_ask == 100
+        and no_bid == 100
+    ):
+        return "rfq_required"
+    return "unavailable"
+
+
 def combo_leg_signature(legs: list[dict[str, Any]]) -> str:
     selected = sorted(
         (
