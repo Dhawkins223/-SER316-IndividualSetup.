@@ -289,39 +289,13 @@ wait_for_database() {
       echo "Local PostgreSQL did not become healthy." >&2
       return 1
     fi
-    # Without this the thirty attempts are spent in a few milliseconds, which
-    # is not a wait for a container that takes seconds to accept connections.
     sleep 2
   done
-  compose_test_database_ready
-}
-
-# The Compose image creates POSTGRES_DB on first boot and nothing else, so the
-# separate test database has to be made here -- `test`, `test-integration` and
-# `verify` all connect to it, and without this they fail with
-# `database "hawknetic_test" does not exist`.
-#
-# The name never reaches SQL: the query is a constant, the match is a
-# fixed-string whole-line compare in the shell, and `createdb` takes the name as
-# an argv. (`psql -c` does not interpolate `:'var'` -- only stdin and -f do --
-# so a parameterised lookup here would be a silent syntax error.)
-#
-# `grep -Fx ... >/dev/null` rather than `grep -Fxq`: -q exits on the first
-# match, and under `set -o pipefail` the SIGPIPE that gives psql becomes the
-# pipeline's status (141). The lookup would then report an existing database as
-# absent and `createdb` would fail on it -- intermittently, once the catalog is
-# long enough that psql is still writing when grep leaves.
-#
-# `--` before the name in both commands: a database name may legitimately begin
-# with a hyphen, and without it grep and createdb would each read one as an
-# option.
-compose_test_database_ready() {
-  if "${compose[@]}" exec -T postgres psql -U "$postgres_user" -d postgres -tAXc \
-      'SELECT datname FROM pg_database' 2>/dev/null \
-      | tr -d '\r' | grep -Fx -- "$test_database" >/dev/null; then
-    return 0
+  if ! "${compose[@]}" exec -T postgres psql -U "$postgres_user" -d postgres -tAc \
+      "SELECT 1 FROM pg_database WHERE datname = '$test_database'" | grep -q 1; then
+    "${compose[@]}" exec -T postgres psql -U "$postgres_user" -d postgres -c \
+      "CREATE DATABASE \"$test_database\"" >/dev/null
   fi
-  "${compose[@]}" exec -T postgres createdb -U "$postgres_user" -- "$test_database"
 }
 
 db_start() {
@@ -415,7 +389,7 @@ case "$command_name" in
     compose_only "reset"
     read -r -p "Delete only the local PostgreSQL volume? Type RESET to continue: " confirmation
     [[ "$confirmation" == "RESET" ]] || { echo "Local database reset cancelled."; exit 1; }
-    if [[ "$db_mode" == "compose" ]]; then
+    if [[ "$database_mode" == "compose" ]]; then
       "${compose[@]}" down -v
     else
       # Dropping databases on a server this script did not start is a much

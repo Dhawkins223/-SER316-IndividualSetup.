@@ -199,6 +199,38 @@ class ExternalDatabaseModeTests(LocalScriptTestCase):
         self.assertNotIn("POSTGRES_PASSWORD", result.stderr)
 
 
+class ShellSyntaxTests(unittest.TestCase):
+    """`local.sh` must parse.
+
+    A merge resolution closed an `until ... do` loop with `fi`, and the whole
+    script stopped parsing -- so every command in it failed, including the
+    `./scripts/local.sh test` that CLAUDE.md names as the way to run this suite.
+    Eight tests in this file went red, and each reported its own assertion
+    rather than the one-line cause, because they all invoke the script and none
+    of them checks that it is a script.
+
+    `bash -n` costs nothing and names the defect directly.
+    """
+
+    def test_the_workflow_script_parses(self) -> None:
+        result = subprocess.run(
+            ["/bin/bash", "-n", str(LOCAL_SCRIPT)], capture_output=True, text=True, timeout=30
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_every_shipped_shell_script_parses(self) -> None:
+        """The same check for the rest of them, since one was enough to break."""
+
+        scripts = sorted(LOCAL_SCRIPT.parent.glob("*.sh"))
+        self.assertTrue(scripts, "no shell scripts found; this test is not looking where it thinks")
+        for script in scripts:
+            with self.subTest(script=script.name):
+                result = subprocess.run(
+                    ["/bin/bash", "-n", str(script)], capture_output=True, text=True, timeout=30
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+
 class ExternalDatabaseConnectionTests(LocalScriptTestCase):
     """Drives the real no-Docker path, not only its entry-point guards.
 
@@ -299,6 +331,24 @@ class ExternalDatabaseConnectionTests(LocalScriptTestCase):
         )
 
         self.assertNotIn("command not found", result.stderr)
+
+    def test_without_docker_it_names_the_way_out(self) -> None:
+        # No Docker on PATH and nothing listening: the workflow should explain
+        # how to point it at a running PostgreSQL rather than demand a
+        # container runtime.
+        #
+        # This asserted `POSTGRES_HOST` and "already running" until the merge
+        # that produced Master kept the other branch's script, where the escape
+        # hatch is the two URLs rather than four POSTGRES_* variables. The
+        # intent is unchanged -- name a way out that is not Docker -- so the
+        # assertion follows the script the repository actually ships.
+        result = self._run("db-start")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("command not found", result.stderr)
+        self.assertIn("Docker is required", result.stderr)
+        self.assertIn("HAWKNETIC_DATABASE_URL", result.stderr)
+        self.assertIn("HAWKNETIC_TEST_DATABASE_URL", result.stderr)
 
 
 class RecursionGuardTests(LocalScriptTestCase):
