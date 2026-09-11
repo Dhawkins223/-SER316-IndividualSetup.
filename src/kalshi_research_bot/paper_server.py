@@ -1791,6 +1791,7 @@ def render_dashboard(
     sports_board = safe_sports_board()
     sports_clv = safe_sports_clv_report()
     sports_summary = summarize_sports_board(sports_board)
+    sports_state_label = "Live sports" if sports_summary["is_current"] else "Sports withheld"
     sports_summary_text = (
         f"{sports_summary['event_count']} upcoming "
         f"{plural(sports_summary['event_count'], 'game')} · "
@@ -1875,6 +1876,8 @@ def render_dashboard(
         f'<span aria-hidden="true">{icon}</span>{html.escape(label)}<b>{count}</b></button>'
         for league, count in sorted(league_counts.items())
         for icon, label in [league_labels.get(league, ("•", league.title()))]
+    )
+
     # Only the tiers this viewer can open. Counting the research-scout tier for
     # a reader gave them a denominator for a panel that is not on their page.
     visible_slips = [primary_slip, leverage_slip, all_day_slip]
@@ -2048,7 +2051,7 @@ def render_dashboard(
           <p class="hero-tagline">Fresh market data, manual review packets, no account automation. Compare live sports prices and inspect exact Kalshi combinations.</p>
         </div>
         <div class="workspace-meta">
-          <span><small>Updated</small><strong>{html.escape(display_generated_at)}</strong></span>
+          <span><small>Updated</small><strong>{generated_at_html}</strong></span>
           <span><small>Refresh cadence</small><strong>{html.escape(refresh_label)}</strong></span>
         <div class="hero-top">
           <div>
@@ -2696,28 +2699,24 @@ def combo_source_context(source_payload: dict | None, slip_key: str | None = Non
     # the code that runs it. A reader wants the same two numbers in words they
     # already use.
     base = (
-        f"Fresh Kalshi source loaded {active_count} active KXMVE contracts; "
-        f"{verified_count} have complete exact-contract evidence for today; "
-        f"{tradable_count} have a public executable combo quote."
         f"Kalshi has {active_count} combo contracts open; "
-        f"{verified_count} are confirmed for today's games."
+        f"{verified_count} are confirmed for today's games; "
+        f"{tradable_count} have a live combo price."
     )
     if rfq_count:
-        base += f" {rfq_count} require an authenticated Kalshi RFQ before a combo price exists."
+        base += f" {rfq_count} need an authenticated Kalshi request before a price exists."
     if not slip_key:
         return base
     tier = (summary.get("tiers") or {}).get(slip_key) or {}
     eligible_count = int(tier.get("eligible_exact_combo_count") or 0)
     watchlist_count = int(tier.get("rfq_watchlist_count") or 0)
     if eligible_count:
-        return f"{base} {eligible_count} meet this tier's exact listed-contract criteria."
+        return f"{base} {eligible_count} fit this tier."
     if watchlist_count:
         return (
-            f"{base} {watchlist_count} exact combinations meet this tier's underlying-leg rules, "
-            "but remain watchlist-only until an RFQ supplies an executable combo price."
+            f"{base} {watchlist_count} fit this tier's leg rules but have no combo price yet, "
+            "so they stay on the watchlist."
         )
-    return f"{base} None meet this tier's exact listed-contract criteria, so no slip is shown."
-        return f"{base} {eligible_count} fit this tier."
     return f"{base} None fit this tier, so there is nothing to show here."
 
 

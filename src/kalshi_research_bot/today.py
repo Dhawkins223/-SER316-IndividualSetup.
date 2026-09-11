@@ -20,20 +20,16 @@ from .combo_safety import (
     combo_leg_signature,
 )
 from .connectors.http import HttpClient
-from .slip_safety import gate_slip_payload
-
-if TYPE_CHECKING:
-    from .evaluation.decision import ResearchDecisionPolicy
 from .slip_analysis import (
     SlipLeg,
     UnmodellableSlip,
     correlation_matrix,
     simulate_correlation_adjustment,
 )
+from .slip_safety import gate_slip_payload
 
 if TYPE_CHECKING:
     from .evaluation.decision import ResearchDecisionPolicy
-from .slip_safety import gate_slip_payload
 
 # Sized from the standard error on the correlation *adjustment*, which is what
 # the simulation is actually for -- the independent part is exact. At 4,000
