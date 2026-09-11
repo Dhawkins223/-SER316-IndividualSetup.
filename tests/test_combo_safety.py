@@ -5,6 +5,7 @@ from kalshi_research_bot.combo_safety import (
     VERIFIED_COMBO_SOURCE,
     authoritative_combo_slip_rejection_reasons,
     COMBO_QUOTE_MESSAGES,
+    authoritative_combo_leg_rejection_reasons,
     combo_leg_signature,
     combo_public_quote_state,
     combo_quote_message,
@@ -163,9 +164,11 @@ class ComboPublicQuoteStateTests(unittest.TestCase):
         # ahead of that guard and raised on the way past it.
         for field in ("yes_ask_cents", "yes_bid_cents", "no_ask_cents", "no_bid_cents"):
             for value in self.MALFORMED:
-                if value is None or isinstance(value, float):
-                    # `or 0` makes these indistinguishable from an absent or
-                    # zero quote, which is the RFQ sentinel's own shape.
+                if value is None:
+                    # `or 0` makes None indistinguishable from an absent or
+                    # zero quote, which is the RFQ sentinel's own shape. NaN is
+                    # not in that position: it is truthy, so it survives the
+                    # `or` and fails every comparison after it.
                     continue
                 with self.subTest(field=field, value=type(value).__name__):
                     self.assertEqual(
@@ -181,6 +184,28 @@ class ComboPublicQuoteStateTests(unittest.TestCase):
 
     def test_a_numeric_string_ask_still_reads_as_a_price(self):
         self.assertTrue(market_is_tradable({"yes_ask_cents": "81"}))
+
+    def test_a_malformed_combo_quote_is_rejected_rather_than_raised(self):
+        # The module's third float() conversion. The first two were hardened a
+        # commit apart, each time only once the previous one had been pointed
+        # out; this covers all three so the next malformed value is caught
+        # here rather than in review.
+        for quote in self.MALFORMED:
+            with self.subTest(quote=type(quote).__name__):
+                leg = {
+                    "combo_eligible": True,
+                    "combo_market_ticker": "KXMVE-1",
+                    "combo_market_status": "active",
+                    "combo_market_yes_ask_cents": quote,
+                    "combo_exact_leg_count": 2,
+                    "combo_evidence_status": VERIFIED_COMBO_EVIDENCE,
+                    "combo_source": VERIFIED_COMBO_SOURCE,
+                    "combo_market_leg_signature": "sha256:whatever",
+                }
+                self.assertIn(
+                    "combo_quote_not_tradable",
+                    authoritative_combo_leg_rejection_reasons(leg, require_tradable_quote=True),
+                )
 
 
 class ComboQuoteMessageTests(unittest.TestCase):

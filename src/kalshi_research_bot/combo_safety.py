@@ -141,7 +141,7 @@ def authoritative_combo_leg_rejection_reasons(
     if require_tradable_quote:
         try:
             live_quote = float(combo_quote)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             live_quote = 0.0
         if not 0.0 < live_quote < 100.0:
             reasons.append("combo_quote_not_tradable")
