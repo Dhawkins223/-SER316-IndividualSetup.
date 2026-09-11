@@ -76,6 +76,8 @@ from .evaluation.model_audit import (
 )
 from .pipeline import ResearchPipeline
 from .retention import (
+    DEFAULT_RETENTION_DAYS,
+    MINIMUM_RETENTION_DAYS,
     RetentionWindowTooShort,
     prune_source_payload_bodies,
     render_storage_report,
@@ -411,6 +413,41 @@ def hosted_web_refresh_seconds() -> int:
         return HOSTED_WEB_REFRESH_SECONDS
 
 
+HOSTED_SERVICE_MODES = ("loop", "once")
+
+
+def hosted_service_mode() -> str:
+    """Whether a hosted worker runs forever or performs exactly one cycle.
+
+    `loop` is the historical behaviour and stays the default: the container
+    stays up and its own `WorkerSpec` cadence provides the schedule.
+
+    `once` exists so a worker can be deployed as a scheduled, scale-to-zero
+    service — a Railway cron service — instead of a container that spends
+    almost all of its life asleep. A worker on a 6-hour cadence holds its
+    memory for 21,600 seconds to do a few seconds of work, and Railway meters
+    memory for every one of those seconds. Running the same cycle from a cron
+    schedule bills only the execution.
+
+    Nothing about the cycle itself changes: `run_worker_once` still claims the
+    same cadence-derived idempotency key, so two runs that land in the same
+    cadence bucket -- a cron service that fires twice within one cadence
+    window -- record `skipped_duplicate` rather than collecting twice.
+
+    That guarantee is bucket-scoped, and it is worth being precise about what
+    it does not cover: `cadence_idempotency_key` buckets wall-clock time, and
+    `start_run` deduplicates on `(worker_name, idempotency_key)`. Two runs in
+    *different* buckets are not mutually excluded, so a loop cycle that
+    straddles a cadence boundary can still overlap a cron run that claims the
+    next bucket. This is not a lock. Deploy the mode change rather than running
+    both side by side: replacing the container leaves no second collector, and
+    `docs/DEPLOYMENT.md` gives the cutover in that order.
+    """
+
+    raw = str(os.environ.get("HAWKNETIC_SERVICE_MODE") or "loop").strip().lower()
+    return raw if raw in HOSTED_SERVICE_MODES else "loop"
+
+
 def run_hosted_service(args: argparse.Namespace) -> int:
     service = str(os.environ.get("HAWKNETIC_SERVICE") or "web").strip()
     if service == "web":
@@ -423,14 +460,30 @@ def run_hosted_service(args: argparse.Namespace) -> int:
     if service not in SERVICE_SPECS:
         print(f"Hosted service blocked: unknown HAWKNETIC_SERVICE={service!r}")
         return 2
+    raw_mode = str(os.environ.get("HAWKNETIC_SERVICE_MODE") or "").strip()
+    mode = hosted_service_mode()
+    if raw_mode and raw_mode.lower() not in HOSTED_SERVICE_MODES:
+        # Loud, but not fatal. A typo in a Railway variable must not stop a
+        # collector; it falls back to the always-on behaviour it had before the
+        # variable existed.
+        print(
+            f"Unknown HAWKNETIC_SERVICE_MODE={raw_mode!r}; "
+            f"expected one of {', '.join(HOSTED_SERVICE_MODES)}. Running as 'loop'."
+        )
+    once = mode == "once"
     worker_args = argparse.Namespace(
         service=service,
-        once=False,
+        once=once,
         idempotency_key=None,
         kalshi_run_id=os.environ.get("KALSHI_RUN_ID", "stage3a_20260703_170707"),
         crypto_run_id=os.environ.get("CRYPTO_RUN_ID", "crypto_private_20260704"),
         sports_run_id=os.environ.get("SPORTS_RUN_ID", "sports_private_20260704"),
     )
+    if once:
+        # A cron service exits as soon as the cycle finishes, so there is no
+        # window in which a health check could be served and no port to bind.
+        # Binding one anyway makes two scheduled runs collide on the port.
+        return run_worker_command(worker_args)
     health_server = start_worker_health_server(service, int(os.environ.get("PORT") or "8765"))
     try:
         return run_worker_command(worker_args)
@@ -1011,7 +1064,8 @@ def run_slip_analyze(args: argparse.Namespace) -> int:
     if ratio is not None:
         print(f"  Independence error     {ratio:.2f}x  ({report['correlated_pairs']} correlated pairs)")
     print("")
-    print(f"  Edge over break-even   {report['edge_over_break_even']:+.2%}")
+    # Percentage points, not percent: this is a difference of two probabilities.
+    print(f"  Edge over break-even   {report['edge_over_break_even'] * 100:+.2f} pts")
     if report["expected_value_is_achievable"]:
         print(f"  Expected value         {report['expected_value']:+.2f} ({report['expected_value_ratio']:+.1%})")
     else:
@@ -1641,7 +1695,15 @@ def build_parser() -> argparse.ArgumentParser:
         "raw-retention",
         help="report raw payload storage and age out payload bodies past a window",
     )
-    raw_retention.add_argument("--older-than-days", type=int, default=30, help="retention window in days (minimum 7)")
+    # Defaulted from the module rather than repeated here. This argument said 30
+    # while the module said 30 and production ran 10, and a window that disagrees
+    # with itself in three places is how the volume filled with nobody wrong.
+    raw_retention.add_argument(
+        "--older-than-days",
+        type=int,
+        default=DEFAULT_RETENTION_DAYS,
+        help=f"retention window in days (default {DEFAULT_RETENTION_DAYS}, minimum {MINIMUM_RETENTION_DAYS})",
+    )
     raw_retention.add_argument("--source", default=None, help="limit to one collection source")
     raw_retention.add_argument("--limit", type=int, default=5000, help="maximum rows pruned in one pass")
     raw_retention.add_argument("--apply", action="store_true", help="write the changes; omit for a dry run")

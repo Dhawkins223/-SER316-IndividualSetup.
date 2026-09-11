@@ -1,0 +1,154 @@
+name: Dependency and secret scanning
+
+# The runtime dependency set is deliberately tiny (psycopg and psycopg_pool),
+# which makes a vulnerability in one of them proportionally more important:
+# there is nothing else in the tree to absorb it. A weekly schedule catches an
+# advisory published against a version this repository already pins, which a
+# push-triggered job would only notice on the next unrelated commit.
+on:
+  push:
+    branches: [Master]
+  pull_request:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dependencies:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install the project and the auditor
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+          python -m pip install pip-audit==2.9.0
+
+      - name: Audit installed dependencies
+        # Neither bare `--strict` nor bare `--skip-editable` is right here.
+        #
+        # `--strict` fails when any distribution could not be audited, and the
+        # project installs itself editable -- no index can resolve an
+        # unpublished local package -- so the job would go red on every run
+        # with no vulnerability in sight.
+        #
+        # Dropping `--strict` fixes that but silences too much: a dependency
+        # skipped for any other reason, such as a transient index or network
+        # error, is logged and the run still exits 0. A security scan that
+        # reports green on an incomplete audit is worse than one that is
+        # merely noisy.
+        #
+        # So audit to JSON and judge the report: every skip except the known
+        # editable one is a failure, and so is any advisory.
+        run: |
+          set -uo pipefail
+          python -m pip_audit --skip-editable --format json --output /tmp/pip-audit.json
+          audit_status=$?
+          if [ ! -s /tmp/pip-audit.json ]; then
+            echo "pip-audit produced no report (exit $audit_status); treating as a failed audit." >&2
+            exit 1
+          fi
+          python - <<'PY'
+          import json
+          import sys
+
+          with open("/tmp/pip-audit.json", encoding="utf-8") as handle:
+              report = json.load(handle)
+
+          # pip-audit 2.9.0 emits {"dependencies": [...], "fixes": [...]};
+          # older versions emitted a bare list. Accept either rather than
+          # depending on the pin never moving.
+          if isinstance(report, dict):
+              dependencies = report.get("dependencies") or []
+          elif isinstance(report, list):
+              dependencies = report
+          else:
+              sys.exit(f"pip-audit report has an unexpected shape: {type(report).__name__}")
+
+          if not dependencies:
+              sys.exit("pip-audit audited no dependencies at all.")
+
+          # The one distribution that legitimately cannot be resolved: this
+          # project, installed editable from the working tree.
+          expected_skip = "distribution marked as editable"
+
+          unexpected = [
+              (dep.get("name", "?"), dep["skip_reason"])
+              for dep in dependencies
+              if dep.get("skip_reason") and dep["skip_reason"].strip().lower() != expected_skip
+          ]
+          vulnerable = [
+              (dep.get("name", "?"), dep.get("version", "?"), vuln.get("id", "?"))
+              for dep in dependencies
+              for vuln in (dep.get("vulns") or [])
+          ]
+
+          for name, reason in unexpected:
+              print(f"::error::{name} could not be audited: {reason}")
+          for name, version, identifier in vulnerable:
+              print(f"::error::{name} {version} is affected by {identifier}")
+
+          audited = len(dependencies) - sum(1 for dep in dependencies if dep.get("skip_reason"))
+          print(f"Audited {audited} of {len(dependencies)} distributions.")
+
+          if unexpected or vulnerable:
+              sys.exit(1)
+          PY
+
+  secrets:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Gitleaks compares commits, so a shallow clone reports nothing on a
+          # push that added the secret in an earlier commit of the same branch.
+          fetch-depth: 0
+
+      - name: Scan history for committed credentials
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  configuration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Refuse tracked environment files
+        # .gitignore already excludes these. This asserts that no future commit
+        # adds one with `git add -f`, which is exactly how the mistake happens.
+        run: |
+          set -euo pipefail
+          tracked="$(git ls-files -- '.env' '.env.*' '*.pem' '*.key' '*.p8' 'config/sources.json' \
+            | grep -v '^\.env\.example$' || true)"
+          if [ -n "$tracked" ]; then
+            echo "Refusing tracked secret-bearing files:" >&2
+            echo "$tracked" >&2
+            exit 1
+          fi
+
+      - name: Refuse a production database default in tracked configuration
+        # Every hosted connection string must arrive from provider variables.
+        # A default baked into a tracked file is both a credential leak and a
+        # way for a test process to reach production.
+        run: |
+          set -euo pipefail
+          if git grep -nIE 'postgres(ql)?://[^[:space:]"'"'"']*@[^[:space:]"'"'"']*(railway|rlwy|render|neon|supabase)' \
+              -- . ':!docs/*' ':!*.md' > /tmp/hits 2>/dev/null; then
+            echo "Hosted connection string committed to the repository:" >&2
+            cut -d: -f1,2 /tmp/hits >&2
+            exit 1
+          fi
+          echo "No hosted connection strings in tracked configuration."

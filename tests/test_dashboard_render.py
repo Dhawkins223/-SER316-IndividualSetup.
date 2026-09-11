@@ -16,6 +16,7 @@ import pathlib
 import re
 import unittest
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from unittest.mock import patch
 
 from kalshi_research_bot.browser_fixtures import (
@@ -592,6 +593,67 @@ class ReaderResearchFramingTests(unittest.TestCase):
         for phrase in ("Slightly better than its price", "break-even", "notebook"):
             with self.subTest(phrase=phrase):
                 self.assertNotRegex(phrase, self.WAGERING)
+
+    def test_reader_navigation_describes_review_in_all_states(self) -> None:
+        for state in ("live", "empty", "stale", "error", "loading"):
+            with self.subTest(state=state):
+                rendered = self.page("read_only", state)
+                self.assertNotRegex(self.visible_text(rendered), re.compile(r"\bbuilder\b", re.I))
+                self.assertIn('aria-label="Review views"', rendered)
+                self.assertIn('href="#prediction-drawer"', rendered)
+
+    def test_summary_matches_the_viewers_responsibility(self) -> None:
+        for role, count in (("read_only", 2), ("admin", 4)):
+            rendered = self.page(role)
+            hero = rendered.split('id="builder"', 1)[1].split('</section>', 1)[0]
+            self.assertEqual(len(re.findall(r'class="stat-card\b', hero)), count)
+            self.assertIn("Contracts checked", hero)
+
+    def test_compact_views_use_the_card_estimate_without_recalculating(self) -> None:
+        for role in ("read_only", "admin"):
+            with self.subTest(role=role):
+                rendered = self.page(role)
+                drawer = rendered.split('id="prediction-drawer"', 1)[1].split('</aside>', 1)[0]
+                card = rendered.split('id="primary"', 1)[1].split('</section>', 1)[0]
+                pattern = r'<small>Estimated to hit</small><strong>([^<]+)</strong>'
+                estimate = re.search(pattern, card).group(1)
+                self.assertEqual(re.search(pattern, drawer).group(1), estimate)
+                self.assertIn(f'<small>Estimated to hit {estimate}</small>', rendered)
+                self.assertIn("Market implied:", drawer)
+
+    def test_compact_views_withhold_an_estimate_for_only_some_legs(self) -> None:
+        from kalshi_research_bot.paper_server import slip_estimate_display
+
+        report = {
+            "analysis_available": True,
+            "skipped_legs": [{"leg_id": "missing", "reason": "no_quoted_ask"}],
+            "analysis": {"hit_probability": .8},
+        }
+        self.assertEqual(slip_estimate_display(report), ("Unavailable", ""))
+
+    def test_fragility_badges_explain_their_basis(self) -> None:
+        from kalshi_research_bot.paper_server import render_slip_analysis
+        from kalshi_research_bot.slip_report import build_slip_analysis
+
+        report = build_slip_analysis(make_verified_fixture_payload(), "primary")
+        for tier, label in (("low", "Few moving parts"), ("moderate", "Some fragility"), ("high", "Fragile"), ("very_high", "Very fragile")):
+            report["analysis"]["risk_tier"] = tier
+            rendered = render_slip_analysis(report)
+            self.assertIn(f">{label}</span>", rendered)
+            self.assertNotRegex(rendered, r'>[^<]* risk</span>')
+            self.assertIn("leg count, correlation, and estimated hit probability", rendered)
+
+    def test_compact_estimate_omits_malformed_intervals(self) -> None:
+        from kalshi_research_bot.paper_server import slip_estimate_display
+
+        for interval in (None, [], [0.2], [0.2, 0.3, 0.4], "bad", {0: 0.2, 1: 0.3},
+                         [float("nan"), 0.9], [0.1, float("inf")], [10 ** 400, 0.9],
+                         ["bad", 0.9], [-0.1, 0.9], [0.2, 1.1], [0.9, 0.1]):
+            with self.subTest(interval=interval):
+                report = {"analysis_available": True, "analysis": {
+                    "hit_probability": 0.8, "hit_probability_interval": interval,
+                }}
+                self.assertEqual(slip_estimate_display(report), ("80.00%", ""))
 
     def test_dollar_figures_are_an_operator_view(self) -> None:
         reader = self.visible_text(self.page("read_only"))
@@ -1389,9 +1451,349 @@ class SourceAgeTests(unittest.TestCase):
 
         from kalshi_research_bot.paper_server import source_age_text
 
-        for junk in ("unknown", "n/a", float("nan"), object()):
-            with self.subTest(junk=junk):
+        # Every junk type that actually reaches this function, chosen by which
+        # exception each one raises rather than by what looks like junk. The
+        # first version of this test used `"unknown"` and `object()` -- a
+        # ValueError and a TypeError -- and passed while a list, a dict, an
+        # infinity and an oversized int all still crashed the page:
+        #
+        #   []             TypeError    unhashable, raised by the `in {None, ""}`
+        #   {}             TypeError    guard itself, before any parsing
+        #   float("inf")   OverflowError  int(float("inf"))
+        #   10 ** 400      OverflowError  float(10 ** 400)
+        #
+        # A test that covers the harmless junk and not the harmful junk reads
+        # like coverage and is not.
+        for junk in ("unknown", "n/a", float("nan"), object(), [], {}, (1, 2),
+                     float("inf"), float("-inf"), 10 ** 400):
+            with self.subTest(junk=repr(junk)):
                 self.assertEqual(source_age_text(junk), "Age unknown")
+
+
+class ProbabilityPointsTests(unittest.TestCase):
+    """A difference between two probabilities is in points, not percent.
+
+    The estimate-versus-price card read
+
+        Needs to hit 56.47%   Estimated to hit 60.1%   Difference +3.6%
+
+    and that last figure is 60.1 minus 56.47. Written with a percent sign it
+    also reads as 3.6% *of* 56.47%, which is 2.0 points -- nearly a factor of
+    two on the one number the card exists to communicate.
+
+    The platform had already settled this and not applied it: the closing-line
+    panel quotes "+1.20 pts" and the report's own name for the measure is
+    `probability_points_versus_closing_line`. Four other places said "%".
+    """
+
+    def test_a_difference_of_probabilities_carries_its_unit(self) -> None:
+        from kalshi_research_bot.paper_server import probability_points
+
+        self.assertEqual(probability_points(0.036), "+3.6 pts")
+        self.assertEqual(probability_points(-0.011), "-1.1 pts")
+        self.assertEqual(probability_points(0.012, 2), "+1.20 pts")
+        self.assertEqual(probability_points(0.036, signed=False), "3.6 pts")
+
+    def test_an_absent_difference_is_not_a_measured_zero(self) -> None:
+        """Same rule as every other statistic on this page."""
+
+        from kalshi_research_bot.paper_server import probability_points
+
+        for absent in (None, "", "unknown", [], {}):
+            with self.subTest(absent=repr(absent)):
+                self.assertEqual(probability_points(absent), "n/a")
+
+    def test_the_closing_line_panel_keeps_the_wording_it_established(self) -> None:
+        """`_clv_points_text` now delegates, so the convention has one
+        definition rather than two that can drift apart."""
+
+        from kalshi_research_bot.paper_server import _clv_points_text
+
+        self.assertEqual(_clv_points_text("0.0120"), "+1.20 pts")
+        self.assertEqual(_clv_points_text(None), "n/a")
+
+
+class RenderedUnitsTests(unittest.TestCase):
+    """The units as a reader actually receives them, from a full render."""
+
+    def setUp(self) -> None:
+        from kalshi_research_bot.browser_fixtures import (
+            make_fixture_research_record,
+            make_fixture_sports_board,
+            make_fixture_sports_clv_report,
+        )
+        from kalshi_research_bot.paper_server import render_dashboard
+
+        with patch(
+            "kalshi_research_bot.paper_server.safe_sports_board",
+            return_value=make_fixture_sports_board(),
+        ), patch(
+            "kalshi_research_bot.paper_server.safe_sports_clv_report",
+            return_value=make_fixture_sports_clv_report(),
+        ), patch(
+            "kalshi_research_bot.paper_server.build_research_record",
+            return_value=make_fixture_research_record(),
+        ):
+            self.rendered = render_dashboard(
+                make_verified_fixture_payload(), principal=principal("admin")
+            )
+        self.text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", self.rendered))
+
+    def test_the_estimate_versus_price_card_reads_in_points(self) -> None:
+        found = re.findall(r"Difference ([+-][\d.]+(?: pts|%))", self.text)
+        self.assertTrue(found, "no Difference figure rendered; fixture no longer reaches the card")
+        for value in found:
+            with self.subTest(value=value):
+                self.assertTrue(value.endswith(" pts"), f"Difference rendered as {value}")
+
+    def test_the_price_comparison_pills_read_in_points(self) -> None:
+        """`Shop +1.5%` and `vs consensus +0.8%` are gaps between two implied
+        probabilities, the same quantity under different names."""
+
+        for label in ("Shop", "vs consensus"):
+            with self.subTest(label=label):
+                found = re.findall(rf"{label} ([+-][\d.]+(?: pts|%))", self.text)
+                # Asserted, not assumed: both pills render only on a positive
+                # gap, so a fixture change could leave this loop iterating over
+                # nothing and passing. Today they read +0.6 and +1.1.
+                self.assertTrue(found, f"no {label} pill rendered; fixture no longer reaches it")
+                for value in found:
+                    self.assertTrue(value.endswith(" pts"), f"{label} rendered as {value}")
+
+    def test_a_probability_itself_is_still_a_percentage(self) -> None:
+        """The change is to differences only. A probability is a percentage and
+        must not be relabelled, or the fix trades one wrong unit for another."""
+
+        self.assertIn("Needs to hit", self.text)
+        self.assertRegex(self.text, r"Needs to hit [\d.]+%")
+        self.assertRegex(self.text, r"Estimated to hit [\d.]+%")
+
+
+class DisplayFormatterTests(unittest.TestCase):
+    """No display formatter may render a number that is not one.
+
+    Every formatter in this module had written its own numeric coercion and
+    every one had the same two holes. `float()` raises OverflowError -- not
+    TypeError, not ValueError -- on an int too large to convert, so `10 ** 400`
+    escaped each `except` clause and 500ed the page. NaN and infinity convert
+    without complaint, so they rendered onto the card:
+
+        percent               nan%        inf%       OverflowError
+        money                 nan         inf        OverflowError
+        dollars               $nan        $inf       OverflowError
+        probability_points    +nan pts    +inf pts   OverflowError
+        format_american_odds  nan         +inf       OverflowError
+
+    A crash is at least visible; `+nan pts` sits on the estimate-versus-price
+    card looking like a measurement. cubic raised one of these on
+    `probability_points`; the same shape was in all six.
+    """
+
+    def formatters(self) -> list[tuple[str, object, str]]:
+        """Every formatter, with the word each uses for a value it cannot read."""
+
+        from kalshi_research_bot import paper_server as ps
+
+        return [
+            ("percent", ps.percent, "n/a"),
+            ("money", ps.money, "n/a"),
+            ("dollars", ps.dollars, "n/a"),
+            ("probability_points", ps.probability_points, "n/a"),
+            ("_clv_points_text", ps._clv_points_text, "n/a"),
+            ("format_american_odds", ps.format_american_odds, "n/a"),
+            ("format_market_line", lambda v: ps.format_market_line(v, "total"), ""),
+        ]
+
+    def test_no_formatter_renders_a_non_finite_number(self) -> None:
+        for name, fn, absent in self.formatters():
+            for label, value in (
+                ("nan", float("nan")),
+                ("inf", float("inf")),
+                ("-inf", float("-inf")),
+                ("oversized int", 10 ** 400),
+                # As strings, because a numeric field crossing JSON arrives as
+                # one. `finite_number` refused these from the start; the echo
+                # fallback handed them straight back until it split on whether
+                # the value parses rather than on its Python type.
+                ("nan as text", "nan"),
+                ("NaN as text", "NaN"),
+                ("Infinity as text", "Infinity"),
+                ("overflowing text", "1e400"),
+                # Decimal because the sports board and the closing-line report
+                # hand this module every number as one, and two versions of the
+                # guard branched on Python type and let it straight through.
+                ("Decimal NaN", Decimal("NaN")),
+                ("Decimal Infinity", Decimal("Infinity")),
+                ("Decimal -Infinity", Decimal("-Infinity")),
+                ("a list", []),
+                ("a dict", {}),
+            ):
+                with self.subTest(formatter=name, value=label):
+                    self.assertEqual(fn(value), absent)
+
+    def test_a_string_it_cannot_read_is_still_echoed(self) -> None:
+        """Deliberate, and preserved: an odds or line value in a format this
+        code does not recognise is more use to a reader shown than swallowed.
+        A non-finite float is not that case -- it is a number meaning no
+        number -- which is why the two are separated rather than merged.
+        """
+
+        from kalshi_research_bot.paper_server import format_american_odds, money
+
+        self.assertEqual(money("EVEN"), "EVEN")
+        self.assertEqual(format_american_odds("EVEN"), "EVEN")
+
+    def test_ordinary_values_are_untouched(self) -> None:
+        from kalshi_research_bot import paper_server as ps
+
+        self.assertEqual(ps.percent(0.036), "3.60%")
+        self.assertEqual(ps.money(-1.5), "-1.50")
+        self.assertEqual(ps.dollars(-1.5), "-$1.50")
+        self.assertEqual(ps.probability_points(0.036), "+3.6 pts")
+        self.assertEqual(ps.format_american_odds(118), "+118")
+        self.assertEqual(ps.format_market_line("218.5", "total"), "218.5")
+
+    # `finite_number` and `unreadable_number` are the two functions allowed to
+    # coerce: the first decides, the second classifies what the first refused.
+    COERCION_HELPERS = ("finite_number", "unreadable_number")
+    # Anything that turns arbitrary input into a number. Named rather than just
+    # `float`, because the hole is reintroduced as easily by `int("1e400")` or
+    # `Decimal(value)` as by the call this started with.
+    COERCION_CALLS = ("float", "int", "Decimal", "complex")
+
+    # Formatters shaped like the others but handed a timestamp rather than a
+    # number. Listed so the inventory check below can tell "not a number
+    # formatter" from "a number formatter nobody exercised".
+    NOT_NUMERIC = ("display_timestamp", "timestamp_element", "display_event_time")
+
+    def module_formatters(self) -> list[str]:
+        """Every display formatter the module actually defines.
+
+        Read from `paper_server` rather than listed here, because a
+        hand-maintained inventory is how a renderer ends up outside the guard
+        that was written for it -- the same failure as the hand-written fixtures
+        in #100. The shape is unambiguous: a module-level function taking
+        `value` first and returning `str`.
+        """
+
+        import ast
+        import inspect
+
+        from kalshi_research_bot import paper_server as ps
+
+        tree = ast.parse(inspect.getsource(ps))
+        return [
+            node.name
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.args.args
+            and node.args.args[0].arg == "value"
+            and self.returns_a_string(node)
+        ]
+
+    # Every way of annotating "this returns display text", and nothing else.
+    # Matching a bare `ast.Name` was too narrow -- `-> "str"` is a Constant and
+    # `-> str | None` a BinOp, so each dropped its formatter out of the
+    # inventory silently. Searching the unparsed text for the word was then too
+    # wide: `tuple[str, str]` contains it and returns no such thing. Comparing
+    # the whole normalised annotation against this set is neither.
+    STRING_ANNOTATIONS = frozenset(
+        {"str", "str | None", "None | str", "Optional[str]", "typing.Optional[str]"}
+    )
+
+    @classmethod
+    def returns_a_string(cls, node) -> bool:
+        import ast
+
+        if node.returns is None:
+            return False
+        # Quotes stripped because `from __future__ import annotations` makes the
+        # quoted form ordinary, and it means exactly the same thing.
+        return ast.unparse(node.returns).strip().strip("\"'") in cls.STRING_ANNOTATIONS
+
+    def test_the_exercised_inventory_is_the_modules_inventory(self) -> None:
+        """A formatter added later fails this until someone classifies it."""
+
+        classified = (
+            {name for name, _, _ in self.formatters()}
+            | set(self.COERCION_HELPERS)
+            | set(self.NOT_NUMERIC)
+        )
+        unclassified = sorted(set(self.module_formatters()) - classified)
+        self.assertEqual(
+            unclassified,
+            [],
+            "these display formatters are exercised by nothing above; add them to "
+            f"formatters() or to NOT_NUMERIC with a reason: {unclassified}",
+        )
+
+    def formatter_bodies(self):
+        import ast
+        import inspect
+
+        from kalshi_research_bot import paper_server as ps
+
+        wanted = {name for name, _, _ in self.formatters()}
+        tree = ast.parse(inspect.getsource(ps))
+        return [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name in wanted]
+
+    def test_every_formatter_defers_to_the_shared_coercion(self) -> None:
+        """The structural half, stated positively.
+
+        Six copies of a guard is how six of them came to be wrong the same way.
+        A blacklist of `float` was the first version of this test and it was too
+        weak: `int()`, `Decimal()` or an aliased `float` reintroduce the hole
+        and pass. So each formatter must *reach* the shared coercion, either by
+        calling it or by delegating to another formatter that does.
+        """
+
+        import ast
+
+        allowed = set(self.COERCION_HELPERS) | {name for name, _, _ in self.formatters()}
+        missing = []
+        for node in self.formatter_bodies():
+            called = {
+                inner.func.id
+                for inner in ast.walk(node)
+                if isinstance(inner, ast.Call) and isinstance(inner.func, ast.Name)
+            }
+            if not called & allowed:
+                missing.append(node.name)
+        self.assertEqual(
+            missing,
+            [],
+            f"these formatters reach neither the shared coercion nor a formatter that does: {missing}",
+        )
+
+    def test_no_formatter_coerces_its_own_input(self) -> None:
+        """And the negative half, broadened past the one call it started with.
+
+        Kept alongside the positive check because a formatter can both call
+        `finite_number` and then coerce something itself, which passes the test
+        above while putting the hole back.
+        """
+
+        import ast
+
+        offenders = []
+        for node in self.formatter_bodies():
+            for inner in ast.walk(node):
+                if not isinstance(inner, ast.Call):
+                    continue
+                name = (
+                    inner.func.id
+                    if isinstance(inner.func, ast.Name)
+                    else inner.func.attr
+                    if isinstance(inner.func, ast.Attribute)
+                    else None
+                )
+                if name in self.COERCION_CALLS:
+                    offenders.append(f"{node.name}:{inner.lineno} calls {name}()")
+        self.assertEqual(
+            offenders,
+            [],
+            f"these formatters coerce their own numbers instead of using finite_number: {offenders}",
+        )
 
 
 if __name__ == "__main__":

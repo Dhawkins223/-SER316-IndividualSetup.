@@ -7,9 +7,11 @@ import shutil
 import tempfile
 import uuid
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
+from threading import Barrier
 from unittest.mock import patch
 from urllib.parse import urlparse, urlunparse
 
@@ -28,6 +30,25 @@ from tests.postgres_support import PostgresTestCase, reset_database, test_settin
 
 
 class PostgresIntegrityTests(PostgresTestCase):
+    def test_cold_pool_serves_simultaneous_borrowers(self) -> None:
+        close_connection_pools()
+        pool = connection_pool(replace(self.settings, pool_min_size=1, pool_max_size=4))
+        start = Barrier(4)
+        borrowed = Barrier(4)
+
+        def query(_index):
+            start.wait(timeout=10)
+            with pool.connection() as connection:
+                pid = connection.execute("SELECT pg_backend_pid() AS pid").fetchone()["pid"]
+                # All four connections must be usable at the same time, even
+                # though the first borrower consumes the minimum idle pool.
+                borrowed.wait(timeout=10)
+                return pid
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            pids = list(executor.map(query, range(4)))
+        self.assertEqual(len(set(pids)), 4)
+
     @contextmanager
     def _temporary_database(self):
         import psycopg

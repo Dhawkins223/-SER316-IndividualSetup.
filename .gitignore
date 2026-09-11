@@ -1,6 +1,12 @@
 __pycache__/
 *.py[cod]
 *.egg-info/
+# `pip wheel .` and `python -m build` leave a full copy of the package here.
+# CI builds a wheel on every run, so an ignored build tree is the difference
+# between a reviewable diff and 40,000 lines of duplicated source.
+build/
+dist/
+*.whl
 .pytest_cache/
 .venv/
 data/*.log

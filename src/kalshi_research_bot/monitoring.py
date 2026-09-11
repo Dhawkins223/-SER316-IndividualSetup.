@@ -13,6 +13,7 @@ from .database import (
     connection_pool,
     database_startup_status,
 )
+from .retention import database_capacity_state, volume_usage_bytes
 
 
 def utc_now_iso() -> str:
@@ -295,6 +296,12 @@ def build_internal_status(
         with connection_pool(monitor.settings).connection() as connection:
             pending = _pending_settlements(connection)
             settlement_delays = _settlement_delays(connection, now_iso=checked_at.isoformat())
+            # Cheap enough to read every status build, and the one number that
+            # predicts the outage that actually happened: a volume at 100% takes
+            # PostgreSQL down in a way a restart cannot fix. Everything on the
+            # volume, not this database alone -- WAL is what filled it.
+            usage = volume_usage_bytes(connection)
+            capacity = {**database_capacity_state(usage["volume_bytes"]), **usage}
             latest_models = [
                 dict(row)
                 for row in connection.execute(
@@ -319,6 +326,7 @@ def build_internal_status(
         pending = {"kalshi": None, "crypto": None, "sports": None}
         settlement_delays = {"kalshi": None, "crypto": None, "sports": None}
         latest_models = []
+        capacity = None
         database = {
             "state": "configured_failed",
             "available": False,
@@ -373,10 +381,33 @@ def build_internal_status(
         anomalies.append({"type": "pending_migrations", "versions": list(pending_versions)})
     elif not database["available"]:
         anomalies.append({"type": "database_failure"})
+    if capacity and capacity["state"] != "ok":
+        anomalies.append(
+            {
+                "type": "database_capacity",
+                "state": capacity["state"],
+                "used_ratio": capacity["used_ratio"],
+                "volume_bytes": capacity["volume_bytes"],
+                "capacity_bytes": capacity["capacity_bytes"],
+                "headroom_bytes": capacity["headroom_bytes"],
+                # Named separately because "prune the database" and "WAL is not
+                # being archived or recycled" are different problems with
+                # different fixes, and the ratio alone does not say which.
+                "cluster_bytes": capacity["cluster_bytes"],
+                "wal_bytes": capacity["wal_bytes"],
+                "wal_measured": capacity["wal_measured"],
+            }
+        )
     connector_status = build_connectors_status()
+    # A volume at or past the critical threshold is roughly two days from
+    # stopping PostgreSQL in a way no restart recovers, so reporting "ready"
+    # through it would understate the one condition this status view exists to
+    # catch. The warning threshold deliberately does not block: there is still
+    # a working system and time to prune.
+    blocking = {"stale_worker_heartbeat", "consecutive_worker_failures", "pending_migrations"}
     ready = database["available"] and not any(
-        anomaly["type"]
-        in {"stale_worker_heartbeat", "consecutive_worker_failures", "pending_migrations"}
+        anomaly["type"] in blocking
+        or (anomaly["type"] == "database_capacity" and anomaly.get("state") == "critical")
         for anomaly in anomalies
     )
     return {
@@ -388,6 +419,7 @@ def build_internal_status(
         "settlement_delays": settlement_delays,
         "models": latest_models,
         "connectors": connector_status.get("states", connector_status),
+        "storage": capacity,
         "anomalies": anomalies,
         "public_exposure_allowed": False,
     }
@@ -400,6 +432,10 @@ def actionable_monitoring_events(status: Mapping[str, Any]) -> list[dict[str, An
         # to start for as long as this holds.
         "pending_migrations": "critical",
         "consecutive_worker_failures": "critical",
+        # A volume that reaches 100% does not degrade, it stops PostgreSQL and
+        # then blocks its own recovery, so this escalates while there is still
+        # room to prune. Severity comes from the anomaly's own state below.
+        "database_capacity": "warning",
         "stale_worker_heartbeat": "warning",
         "stale_market_data": "warning",
         "stale_external_data": "warning",
@@ -412,17 +448,31 @@ def actionable_monitoring_events(status: Mapping[str, Any]) -> list[dict[str, An
         event_type = str(anomaly.get("type") or "monitoring_anomaly")
         if event_type not in severity_by_type:
             continue
+        severity = severity_by_type[event_type]
+        if event_type == "pending_migrations":
+            next_action = (
+                "apply the pending migrations: PYTHONPATH=src python -m "
+                "kalshi_research_bot database-migrate"
+            )
+        elif event_type == "database_capacity":
+            # The anomaly carries its own severity because the gap between 75%
+            # and 90% is the gap between "schedule a prune" and "act now".
+            if str(anomaly.get("state")) == "critical":
+                severity = "critical"
+            next_action = (
+                "the database is filling its volume: narrow RAW_RETENTION_DAYS and "
+                "confirm the raw-retention worker is applying, then reclaim space "
+                "per docs/raw-payload-retention.md. A volume at 100% stops "
+                "PostgreSQL and blocks its own recovery."
+            )
+        else:
+            next_action = "inspect /internal/status.json and the affected private worker"
         events.append(
             {
-                "severity": severity_by_type[event_type],
+                "severity": severity,
                 "event_type": event_type,
                 "message": json.dumps(anomaly, sort_keys=True),
-                "next_action": (
-                    "apply the pending migrations: PYTHONPATH=src python -m "
-                    "kalshi_research_bot database-migrate"
-                    if event_type == "pending_migrations"
-                    else "inspect /internal/status.json and the affected private worker"
-                ),
+                "next_action": next_action,
             }
         )
     if status.get("status") != "ready" and not events:

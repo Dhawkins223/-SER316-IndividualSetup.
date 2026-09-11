@@ -65,7 +65,7 @@ per-pass limit.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `RAW_RETENTION_DAYS` | 30 | Window in days. Anything under the seven-day floor is raised to it. Production runs 10 — see the arithmetic below. |
+| `RAW_RETENTION_DAYS` | 10 | Window in days. Anything under the seven-day floor is raised to it. See the arithmetic below before widening it. |
 | `RAW_RETENTION_BATCH_LIMIT` | 5000 | Maximum bodies pruned in one pass. |
 | `RAW_RETENTION_DRY_RUN` | false | Set true to report without writing. |
 
@@ -165,9 +165,15 @@ payload bodies — about **166 MB per day of raw payloads** specifically, agains
 | 10 days | ~1.7 GB | ~2.7 GB | production's setting |
 | 7 days | ~1.2 GB | ~2.2 GB | ample headroom |
 
-Production runs a ten-day window. A thirty-day window was tried first and pruned
+Ten days is the default, and what production runs. A thirty-day window was tried
+first and pruned
 nothing — not because retention was broken, but because the table only held 12
-days of data and never would hold thirty: the volume fills first. A window that
+days of data and never would hold thirty: the volume fills first. That is not a
+hypothetical: on 2026-09-01 the volume reached 100%, PostgreSQL PANICked
+mid-write, and could not restart, because WAL recovery needs to write too. The
+default is now ten rather than thirty for exactly this reason, and
+`database_capacity` alarms at 75% so the next approach to the ceiling is noticed
+rather than discovered. A window that
 never becomes eligible is indistinguishable from having no retention at all,
 which is why `window_bites` is reported.
 

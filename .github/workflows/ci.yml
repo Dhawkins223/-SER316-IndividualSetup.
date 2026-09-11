@@ -9,7 +9,47 @@ on:
 permissions:
   contents: read
 
+# One run per branch. Pushing twice in a minute used to leave both runs going,
+# and this workflow starts a PostgreSQL service and a Chromium download in
+# every one of them -- superseded runs are answering a question nobody is
+# waiting for, on minutes that are metered.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  browser:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      PYTHONPATH: src:.
+      APP_ENV: test
+      SMOKE: "1"
+      SMOKE_ARTIFACT_DIR: /tmp/hawknetic-browser
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install browser test dependencies
+        run: python -m pip install -e '.[browser]'
+      - name: Cache Chromium
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: chromium-${{ runner.os }}-${{ hashFiles('pyproject.toml') }}
+      - name: Install Chromium and system libraries
+        run: python -m playwright install --with-deps chromium
+      - name: Check all dashboard roles, states, and widths
+        run: python scripts/browser_smoke.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dashboard-browser-checks
+          path: /tmp/hawknetic-browser
+          if-no-files-found: ignore
   validate:
     runs-on: ubuntu-24.04
     services:

@@ -190,6 +190,17 @@ def refresh_market_consensus_baseline(
                 for row, _, _, snapshot_hash in sorted(usable, key=lambda item: int(item[0]["market_id"]))
             ]
         )
+        # Serialize creation for this exact model and dataset. A completed-run
+        # lookup alone is not idempotent: two workers can both see no row and
+        # then append duplicate prediction lineage. The transaction lock stays
+        # held through all writes and releases on commit or rollback.
+        # The configured statement timeout also bounds this wait. An overlong
+        # overlap fails the worker cycle for retry; it must never bypass the
+        # lock or claim a completed refresh merely to report success.
+        connection.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+            (f"research-baseline:{MODEL_NAME}:{MODEL_VERSION}:{code_commit}:{dataset_hash}",),
+        )
         model_configuration = canonical_json(
             {
                 "kind": "market_consensus_baseline",

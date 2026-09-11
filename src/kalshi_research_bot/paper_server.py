@@ -10,8 +10,8 @@ import threading
 import time
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 from math import isfinite
+from pathlib import Path
 from typing import Mapping
 from urllib.parse import parse_qs, urlparse
 
@@ -797,20 +797,109 @@ def slip_is_built(slip: Mapping[str, object] | None) -> bool:
     return (slip or {}).get("action") == "BUILD_SLIP"
 
 
+def finite_number(value: object) -> float | None:
+    """The one place this module decides whether a value is a number.
+
+    Every display formatter below had written its own version of this and every
+    one of them had the same two holes. `float()` raises OverflowError -- not
+    TypeError, not ValueError -- for an int too large to convert, so
+    `10 ** 400` escaped each `except` clause and 500ed the page. And NaN and
+    infinity convert without complaint, so `+nan pts`, `inf%` and `$inf`
+    rendered onto the card as though they were measurements:
+
+        percent               nan%        inf%       OverflowError
+        money                 nan         inf        OverflowError
+        dollars               $nan        $inf       OverflowError
+        probability_points    +nan pts    +inf pts   OverflowError
+        format_american_odds  nan         +inf       OverflowError
+
+    A crash is at least visible. `+nan pts` sits on the estimate-versus-price
+    card looking like a number, which is the failure this platform is most
+    concerned with everywhere else.
+
+    Returning None rather than raising lets each caller keep its own word for
+    absence -- "n/a" for most, the escaped original for `money`.
+    """
+
+    try:
+        number = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if isfinite(number) else None
+
+
+def unreadable_number(value: object, absent: str = "n/a") -> str:
+    """What to show once `finite_number` has said no.
+
+    These formatters deliberately echo what they were handed rather than hide
+    it: an odds or line value in a format this code does not recognise -- a
+    bare "EVEN", say -- is more use to a reader shown than swallowed. A
+    non-finite number is not that case. NaN and infinity are numeric values
+    meaning "no number", and echoing them puts `$nan` and `inf` on the page
+    exactly where a measurement goes.
+
+    The line between the two is whether the value parses as a number at all,
+    and nothing else. Two versions of this branched on Python type first and
+    each one leaked a different way: `isinstance(value, (int, float))` echoed
+    the string `"nan"`, and adding a `str` branch beside it still echoed
+    `Decimal("NaN")` -- which matters because the sports board and the
+    closing-line report hand every number to this module as a Decimal.
+
+    So there is no type test here at all. Ask `float()` and let the exception
+    say which case it is.
+    """
+
+    try:
+        float(value)  # type: ignore[arg-type]
+    except ValueError:
+        # Text the parser cannot read. This is the case the echo exists for: a
+        # bare "EVEN" in an odds field is more use to a reader shown than
+        # swallowed.
+        return html.escape(str(value))
+    except TypeError:
+        # Not number-shaped at all -- a list, a dict, None. Echoing gives the
+        # reader "[]" where a measurement goes.
+        return absent
+    except OverflowError:
+        return absent
+    # It parses, and `finite_number` has already refused it, so it is a number
+    # that is not one: NaN or an infinity, whatever type it arrived as.
+    return absent
+
+
 def money(value: object) -> str:
     if value is None or value == "":
         return "n/a"
-    try:
-        return f"{float(value):.2f}"
-    except (TypeError, ValueError):
-        return html.escape(str(value))
+    number = finite_number(value)
+    if number is None:
+        return unreadable_number(value)
+    return f"{number:.2f}"
 
 
 def percent(value: object, decimals: int = 2) -> str:
-    try:
-        return f"{float(value) * 100:.{decimals}f}%"
-    except (TypeError, ValueError):
+    number = finite_number(value)
+    return "n/a" if number is None else f"{number * 100:.{decimals}f}%"
+
+
+def probability_points(value: object, decimals: int = 1, *, signed: bool = True) -> str:
+    """The gap between two probabilities, in percentage points.
+
+    A difference of probabilities is not a percentage of anything, and writing
+    it as one is ambiguous in a way that matters here. "Difference +3.6%"
+    against a 56.47% break-even reads either as 3.6 points -- what the number
+    is -- or as 3.6% of 56.47%, which is 2.0 points. Nearly a factor of two, on
+    the single figure the estimate-versus-price card exists to communicate.
+
+    This platform had already settled the question elsewhere and not applied it:
+    the closing-line panel quotes "+1.20 pts", and the report's own name for the
+    measure is `probability_points_versus_closing_line`. Four other places said
+    "%" for the same quantity.
+    """
+
+    number = finite_number(value)
+    if number is None:
         return "n/a"
+    return f"{number * 100:{'+' if signed else ''}.{decimals}f} pts"
 
 
 def dollars(value: object) -> str:
@@ -821,9 +910,8 @@ def dollars(value: object) -> str:
     at the ask, and so worth rendering as money rather than as a typo.
     """
 
-    try:
-        number = float(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
+    number = finite_number(value)
+    if number is None:
         return money(value)
     return f"-${money(abs(number))}" if number < 0 else f"${money(number)}"
 
@@ -1055,6 +1143,15 @@ def render_market_browser(payload: dict) -> str:
 
 
 def market_public_quote_state(market: dict) -> str:
+    """Whether this exact combo has a public price, needs an RFQ, or has neither.
+
+    The collector records the answer on the market; recomputing it here is the
+    fallback for a snapshot written before it did. An all-or-nothing book on a
+    live KXMVE contract -- nothing bid on YES, NO offered at the full dollar --
+    is not a market priced at zero. It is Kalshi declining to quote the
+    combination publicly, which is a state the row has to name rather than
+    print as `0.00c`.
+    """
     explicit = str(market.get("public_quote_state") or "").lower()
     if explicit in {"tradable", "rfq_required", "unavailable"}:
         return explicit
@@ -1083,7 +1180,7 @@ def render_market_browser_row(market: dict) -> str:
     leg_count = len(legs) or len(market.get("legs") or [])
     ready = bool(market.get("real_data_ready"))
     quote_state = market_public_quote_state(market)
-    if quote_state == "rfq_required" and ready:
+    if ready and quote_state == "rfq_required":
         status_text = "RFQ required"
         status_class = "warning"
         yes_quote = "RFQ required"
@@ -1092,19 +1189,24 @@ def render_market_browser_row(market: dict) -> str:
             market.get("public_quote_message")
             or "Kalshi requires an authenticated RFQ for this exact combo; the public orderbook has no executable price."
         )
-    elif quote_state == "tradable" and ready:
-        status_text = "Quoted"
+    elif ready and quote_state == "tradable":
+        status_text = "Verified"
         status_class = "good"
         yes_quote = f"{money(market.get('yes_ask_cents'))}c"
         no_quote = f"{money(market.get('no_ask_cents'))}c"
-        quote_message = str(market.get("real_data_warning") or "Public Kalshi combo quote is available.")
+        quote_message = str(market.get("real_data_warning") or "Prices come straight from Kalshi.")
     else:
         status_text = "Incomplete"
         status_class = "warning"
         yes_quote = "Unavailable"
         no_quote = "Unavailable"
-        quote_message = str(market.get("real_data_warning") or "No public executable combo quote is available.")
+        quote_message = str(
+            market.get("real_data_warning") or "No public executable combo quote is available."
+        )
     close_text = display_event_time(market.get("close_time"))
+    # The legs carry live prices even when the combination itself does not, and
+    # saying how many is what separates "we have no data" from "Kalshi will not
+    # quote this publicly yet".
     priced_probabilities = [
         float(leg["market_implied_probability"]) * 100
         for leg in legs
@@ -1115,19 +1217,10 @@ def render_market_browser_row(market: dict) -> str:
         f"{len(priced_probabilities)} priced underlying legs"
         + (f" · {probability_preview}" if probability_preview else "")
     )
-    search_text = " ".join(
-        [
-            ticker,
-            title,
-            *(str(leg.get("display_event") or leg.get("title") or leg.get("market_ticker") or "") for leg in legs),
-        ]
-    ).lower()
     detail_items = "".join(render_market_preview_leg(leg) for leg in legs)
     if not detail_items:
         detail_items = '<li>Underlying leg details are not available.</li>'
     return f"""
-    <article class="market-browser-row" data-search="{html.escape(search_text, quote=True)}">
-      <div class="market-browser-heading">
     <article class="data-row">
       <div class="row-heading">
         <span class="contract-orb" aria-hidden="true"></span>
@@ -1137,22 +1230,14 @@ def render_market_browser_row(market: dict) -> str:
           <small>{html.escape(leg_price_summary)}</small>
         </div>
       </div>
-      <div class="market-quote-cell"><small>Combo YES</small><strong>{html.escape(yes_quote)}</strong></div>
-      <div class="market-quote-cell"><small>Combo NO</small><strong>{html.escape(no_quote)}</strong></div>
-      <div class="market-quote-cell"><small>24h volume</small><strong>{html.escape(str(market.get("volume_24h") or "n/a"))}</strong></div>
-      <span class="pill {status_class}">{status_text}</span>
-      <details class="market-browser-details">
-        <summary>View {len(priced_probabilities)} priced exact legs</summary>
-        <ul>{detail_items}</ul>
-        <p>{html.escape(quote_message)}</p>
-      <div class="quote-cell"><small>YES ask</small><strong>{money(market.get("yes_ask_cents"))}c</strong></div>
-      <div class="quote-cell"><small>NO ask</small><strong>{money(market.get("no_ask_cents"))}c</strong></div>
+      <div class="quote-cell"><small>Combo YES</small><strong>{html.escape(yes_quote)}</strong></div>
+      <div class="quote-cell"><small>Combo NO</small><strong>{html.escape(no_quote)}</strong></div>
       <div class="quote-cell"><small>24h volume</small><strong>{html.escape(str(market.get("volume_24h") or "n/a"))}</strong></div>
       <span class="badge {status_class}">{status_text}</span>
       <details class="row-details">
         <summary>Inspect listed legs</summary>
         <ul>{detail_items}</ul>
-        <p>{html.escape(str(market.get("real_data_warning") or "Prices come straight from Kalshi."))}</p>
+        <p>{html.escape(quote_message)}</p>
       </details>
     </article>
     """
@@ -1396,20 +1481,16 @@ def render_sports_clv_panel(report: dict, *, technical: bool = True) -> str:
 
 
 def _clv_points_text(value: object) -> str:
-    try:
-        return f"{float(value) * 100:+.2f} pts"
-    except (TypeError, ValueError):
-        return "n/a"
+    return probability_points(value, 2)
 
 
 def format_american_odds(value: object) -> str:
     """Render an exact stored price as a bettor reads it (+110, -120)."""
-    if value in {None, ""}:
+    if value is None or (isinstance(value, str) and not value):
         return "n/a"
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return html.escape(str(value))
+    number = finite_number(value)
+    if number is None:
+        return unreadable_number(value)
     rendered = f"{number:g}"
     return f"+{rendered}" if number > 0 else rendered
 
@@ -1449,17 +1530,9 @@ def render_sports_event(event: dict) -> str:
     markets = "".join(render_sports_market(market) for market in event.get("markets") or [])
     league = str(event.get("league") or "").upper()
     start_text = display_event_time(event.get("game_start_time"))
-    search_text = " ".join(
-        [
-            str(event.get("away_team") or ""),
-            str(event.get("home_team") or ""),
-            league,
-            *(str(market.get("market_type") or "") for market in event.get("markets") or []),
-        ]
-    ).lower()
     market_count = int(event.get("market_count") or 0)
     return f"""
-    <article class="sports-event" data-league="{html.escape(league, quote=True)}" data-search="{html.escape(search_text, quote=True)}">
+    <article class="sports-event">
       <div class="sports-event-heading">
         <span class="contract-orb" aria-hidden="true"></span>
         <div>
@@ -1474,12 +1547,11 @@ def render_sports_event(event: dict) -> str:
 
 def format_market_line(value: object, market_type: str) -> str:
     """Spreads carry a sign; totals are a bare number ("8.5", not "+8.5")."""
-    if value in {None, ""}:
+    if value is None or (isinstance(value, str) and not value):
         return ""
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return html.escape(str(value))
+    number = finite_number(value)
+    if number is None:
+        return unreadable_number(value, "")
     rendered = f"{number:g}"
     if "spread" in market_type.strip().lower() and number > 0:
         return f"+{rendered}"
@@ -1525,7 +1597,7 @@ def render_sports_selection(entry: dict, market_type: str = "") -> str:
     except (TypeError, ValueError):
         gain_value = 0.0
     gain_html = (
-        f'<span class="badge good sports-shop-pill">Shop +{gain_value * 100:.1f}%</span>' if gain_value > 0 else ""
+        f'<span class="badge good sports-shop-pill">Shop {probability_points(gain_value)}</span>' if gain_value > 0 else ""
     )
     # Only a positive gap is shown as one. A negative gap is the ordinary state
     # of a priced market and would read as a signal if it were given a pill.
@@ -1537,7 +1609,7 @@ def render_sports_selection(entry: dict, market_type: str = "") -> str:
     gap_html = (
         f'<span class="badge good sports-shop-pill" title="Best posted price implies less probability '
         f'than the books\' own consensus. A price comparison, not a validated edge.">'
-        f'vs consensus +{gap_value * 100:.1f}%</span>'
+        f'vs consensus {probability_points(gap_value)}</span>'
         if gap_value > 0
         else ""
     )
@@ -1557,41 +1629,62 @@ def render_sports_selection(entry: dict, market_type: str = "") -> str:
     """
 
 
-def render_compact_slip(slip: dict, source_payload: dict, *, show_dollar_figures: bool = True) -> str:
+def slip_analysis_report(slip: dict, payload: dict, slip_key: str) -> dict:
+    """Use one bounded, failure-aware analysis path for every slip view."""
+    if slip_key not in SLIP_SOURCES:
+        return {"analysis_available": False, "detail": "Unknown review tier."}
+    try:
+        return build_slip_analysis(
+            {**payload, SLIP_SOURCES[slip_key][0]: slip},
+            slip_key,
+            stake=DEFAULT_SLIP_STAKE_DOLLARS,
+        )
+    except Exception as error:
+        return {"analysis_available": False, "detail": f"Slip arithmetic unavailable: {type(error).__name__}."}
+
+
+def slip_estimate_display(report: dict) -> tuple[str, str]:
+    """Format the same estimate and interval in the card, tile and drawer.
+
+    A partial analysis describes fewer legs than the listed slip. Compact
+    views cannot silently present it as a probability for the complete slip.
+    """
+    if not report.get("analysis_available") or report.get("skipped_legs"):
+        return "Unavailable", ""
+    analysis = report.get("analysis") or {}
+    value = finite_number(analysis.get("hit_probability"))
+    if value is None or not 0 <= value <= 1:
+        return "Unavailable", ""
+    interval = analysis.get("hit_probability_interval")
+    if isinstance(interval, (list, tuple)) and len(interval) == 2:
+        low, high = (finite_number(endpoint) for endpoint in interval)
+        interval = [low, high] if low is not None and high is not None and 0 <= low <= high <= 1 else None
+    else:
+        interval = None
+    decimals = significant_decimals(interval)
+    band = (
+        f'<small class="metric-range">95% CI '
+        f'{interval[0] * 100:.{decimals}f}-{interval[1] * 100:.{decimals}f}%</small>'
+        if interval else ""
+    )
+    return f"{value * 100:.{decimals}f}%", band
+
+
+def render_compact_slip(
+    slip: dict, source_payload: dict, *, show_dollar_figures: bool = True,
+    analysis_report: dict | None = None,
+) -> str:
     if slip.get("action") != "BUILD_SLIP":
         reason = str(slip.get("reason") or "No exact listed combo currently meets the review rules.")
         source_context = combo_source_context(source_payload, "primary")
-        summary = source_payload.get("combo_source_summary") or {}
-        exact_count = int(summary.get("verified_current_day_contract_count") or 0)
-        quoted_count = int(summary.get("tradable_kxmve_market_count") or 0)
-        rfq_count = int(summary.get("rfq_required_kxmve_market_count") or 0)
-        watch_markets = sorted(
-            [market for market in source_payload.get("markets") or [] if market.get("real_data_ready")],
-            key=lambda market: (
-                market_public_quote_state(market) != "tradable",
-                -(float(market.get("adjusted_market_implied_probability") or 0)),
-            ),
-        )[:4]
-        watch_items = "".join(render_drawer_watch_market(market) for market in watch_markets)
         return f"""
-        <div class="drawer-slip-state">
-          <span class="pill warning">Watchlist only</span>
-          <strong>Exact combination research</strong>
-          <small>Fresh source-backed markets, no account automation</small>
+        <div class="drawer-empty-state">
+          <span class="drawer-warning" aria-hidden="true">!</span>
+          <strong>No verified primary slip</strong>
+          <p>{html.escape(reason)}</p>
+          {f'<small>{html.escape(source_context)}</small>' if source_context else ''}
         </div>
-        <div class="drawer-alert">
-          <span aria-hidden="true">△</span>
-          <p>{html.escape(reason)} Unpriced combinations remain blocked until Kalshi exposes an executable quote.</p>
-        </div>
-        <div class="drawer-metrics">
-          <span><small>Exact today</small><strong>{exact_count}</strong></span>
-          <span><small>Public quotes</small><strong>{quoted_count}</strong></span>
-          <span><small>Awaiting RFQ</small><strong>{rfq_count}</strong></span>
-        </div>
-        <div class="drawer-watchlist-head"><strong>Top live combinations</strong><span>{len(watch_markets)} shown</span></div>
-        <ul class="drawer-watchlist">{watch_items}</ul>
-        {f'<p class="drawer-source-context">{html.escape(source_context)}</p>' if source_context else ''}
-        <a class="drawer-primary-link" href="#market-browser">Review all live combinations <span>→</span></a>
+        <a class="drawer-secondary-action" href="#market-browser">Review live contracts</a>
         """
     label = "PRIMARY 80c+ REVIEW SLIP"
     fallback_copy_text = slip_copy_text(slip, label)
@@ -1612,6 +1705,8 @@ def render_compact_slip(slip: dict, source_payload: dict, *, show_dollar_figures
     status_text = "Ready to review" if manual_ready else "Review required"
     status_class = "good" if manual_ready else "warning"
     combo_chance_text, combo_chance_range = combo_probability_display(slip)
+    report = analysis_report if analysis_report is not None else slip_analysis_report(slip, source_payload, "primary")
+    estimate_text, estimate_range = slip_estimate_display(report)
     # What $5 turns into is a wagering figure, and "payout" is a wagering word.
     # A reader's drawer says what the contract costs and what that price
     # implies; the return on a hypothetical stake stays on the operator's page.
@@ -1631,10 +1726,12 @@ def render_compact_slip(slip: dict, source_payload: dict, *, show_dollar_figures
       <p>Research only. Check every side, price, and start time against Kalshi before relying on it.</p>
     </div>
     <div class="drawer-metrics{'' if show_dollar_figures else ' is-two-up'}">
+      <span><small>Estimated to hit</small><strong>{estimate_text}</strong>{estimate_range}</span>
       <span><small>Price</small><strong>{money(slip.get("estimated_combo_price_cents"))}c</strong></span>
-      <span><small>Implied chance</small><strong>{combo_chance_text}</strong>{combo_chance_range}</span>
       {payout_cell}
     </div>
+    <p class="status-note">Market implied: {combo_chance_text}. Estimate uses leg prices and correlation assumptions; it is not a validated forecast.</p>
+    {combo_chance_range}
     <ul class="drawer-leg-list">{compact_legs}</ul>
     {f'<p class="drawer-more">+{hidden_leg_count} more listed legs in the full review</p>' if hidden_leg_count else ''}
     <button type="button" class="btn btn-primary copy" data-copy="{html.escape(review_text, quote=True)}">Copy Review Packet</button>
@@ -1642,24 +1739,6 @@ def render_compact_slip(slip: dict, source_payload: dict, *, show_dollar_figures
       <a href="#primary">Full slip details</a>
       <a href="/review-packet.txt?slip=primary" download>Download TXT</a>
     </div>
-    """
-
-
-def render_drawer_watch_market(market: dict) -> str:
-    title = str(market.get("title") or market.get("ticker") or "Exact Kalshi combination")
-    legs = list(market.get("leg_details") or [])
-    priced_count = sum(1 for leg in legs if leg.get("market_implied_probability") is not None)
-    quote_state = market_public_quote_state(market)
-    state_text = "Public quote" if quote_state == "tradable" else "RFQ required"
-    state_class = "good" if quote_state == "tradable" else "warning"
-    probability = market.get("adjusted_market_implied_probability")
-    probability_text = "n/a" if probability is None else f"{float(probability) * 100:.1f}%"
-    return f"""
-    <li>
-      <span class="contract-orb" aria-hidden="true"></span>
-      <div><strong>{html.escape(title)}</strong><small>{len(legs)} exact legs · {priced_count} priced</small></div>
-      <div class="drawer-watch-state"><b>{html.escape(probability_text)}</b><span class="pill {state_class}">{state_text}</span></div>
-    </li>
     """
 
 
@@ -1791,7 +1870,6 @@ def render_dashboard(
     sports_board = safe_sports_board()
     sports_clv = safe_sports_clv_report()
     sports_summary = summarize_sports_board(sports_board)
-    sports_state_label = "Live sports" if sports_summary["is_current"] else "Sports withheld"
     sports_summary_text = (
         f"{sports_summary['event_count']} upcoming "
         f"{plural(sports_summary['event_count'], 'game')} · "
@@ -1824,6 +1902,11 @@ def render_dashboard(
     # points, and a reader gets exactly that. The dollar restatement stays on
     # the operator's page, where it is a working figure rather than a pitch.
     viewer_sees_dollar_figures = viewer_sees_operations
+    analysis_reports = {
+        key: slip_analysis_report(payload.get(field) or {}, payload, key)
+        for key, (field, _) in SLIP_SOURCES.items()
+        if key != "research_edge" or viewer_sees_operations
+    }
     source_data_panel = render_source_data_panel(
         source_data_preview or {},
         can_refresh=viewer_can_refresh,
@@ -1857,27 +1940,16 @@ def render_dashboard(
         else "Live market data"
     )
     verified_contracts = int(summary.get("verified_current_day_contract_count") or 0)
-    tradable_contracts = int(summary.get("tradable_kxmve_market_count") or 0)
+    # A contract being open is not the same as it having a price you can act
+    # on. The browser below prints "RFQ required" on the individual rows, so
+    # the panel's own line says how many of them to expect.
     rfq_contracts = int(summary.get("rfq_required_kxmve_market_count") or 0)
-    league_counts: dict[str, int] = {}
-    for event in sports_board.get("events") or []:
-        league = str(event.get("league") or "Other").upper()
-        league_counts[league] = league_counts.get(league, 0) + 1
-    league_labels = {
-        "NBA": ("◉", "NBA"),
-        "WNBA": ("◉", "WNBA"),
-        "NFL": ("◈", "NFL"),
-        "MLB": ("◆", "MLB"),
-        "NHL": ("◇", "NHL"),
-        "SOCCER": ("◌", "Soccer"),
-    }
-    league_buttons = "".join(
-        f'<button type="button" class="sport-filter" data-league="{html.escape(league, quote=True)}">'
-        f'<span aria-hidden="true">{icon}</span>{html.escape(label)}<b>{count}</b></button>'
-        for league, count in sorted(league_counts.items())
-        for icon, label in [league_labels.get(league, ("•", league.title()))]
+    market_browser_summary = (
+        f"{len(markets)} combo contracts open for review right now."
+        if not rfq_contracts
+        else f"{len(markets)} combo contracts open for review right now · "
+        f"{rfq_contracts} awaiting an RFQ before a combo price exists."
     )
-
     # Only the tiers this viewer can open. Counting the research-scout tier for
     # a reader gave them a denominator for a panel that is not on their page.
     visible_slips = [primary_slip, leverage_slip, all_day_slip]
@@ -1925,7 +1997,7 @@ def render_dashboard(
 
       <section class="panel" id="research-edge">
         <div class="section-head"><div><span class="section-label">Operations</span><h2>Research Scout Slip</h2></div><p>Research estimates remain clearly labeled</p></div>
-        {render_slip_section(research_edge_slip, "RESEARCH SCOUT SLIP", "research_edge", payload, show_dollar_figures=viewer_sees_dollar_figures)}
+        {render_slip_section(research_edge_slip, "RESEARCH SCOUT SLIP", "research_edge", payload, show_dollar_figures=viewer_sees_dollar_figures, analysis_report=analysis_reports.get("research_edge"))}
       </section>"""
         if viewer_sees_operations
         else ""
@@ -1935,14 +2007,14 @@ def render_dashboard(
     # two links would scroll nowhere. They are replaced by the tiers a reader
     # actually came for.
     mobile_navigation_html = (
-        f"""<a href="#builder">{icon("builder")}Builder</a>
-    <a href="#primary">{icon("slip")}Slips</a>
+        f"""<a href="#builder">{icon("builder")}Review</a>
+    <a href="#prediction-drawer">{icon("slip")}Slip</a>
     <a href="#record">{icon("record")}History</a>
     <a href="#quality">{icon("health")}Quality</a>"""
         if viewer_sees_operations
-        else f"""<a href="#builder">{icon("builder")}Builder</a>
+        else f"""<a href="#builder">{icon("builder")}Review</a>
     <a href="#market-browser">{icon("contracts")}Contracts</a>
-    <a href="#primary">{icon("slip")}Slips</a>
+    <a href="#prediction-drawer">{icon("slip")}Slip</a>
     <a href="#all-day">{icon("clock")}All-day</a>"""
     )
     operator_navigation_html = (
@@ -1969,6 +2041,23 @@ def render_dashboard(
         if viewer_sees_operations
         else ""
     )
+    summary_cards_html = (
+        f'<div class="stat-card"><small>Games loaded</small><strong>{len(games)}</strong></div>'
+        f'<div class="stat-card"><small>Combo contracts</small><strong>{len(markets)}</strong></div>'
+        if viewer_sees_operations else ""
+    )
+    summary_cards_html += (
+        f'<div class="stat-card"><small>Contracts checked</small><strong>{verified_contracts}</strong>'
+        '<span class="stat-foot">Confirmed live on Kalshi today</span></div>'
+        f'<div class="stat-card {"is-accent" if ready_tiers else "is-warning"}">'
+        f'<small>Review tiers ready</small><strong>{ready_tiers}/{tier_total}</strong></div>'
+    )
+    drawer_ready = slip_is_built(primary_slip)
+    drawer_summary = (
+        f'{int(primary_slip.get("leg_count") or 0)} listed legs · '
+        f'{money(primary_slip.get("estimated_combo_price_cents"))}c'
+        if drawer_ready else 'No verified primary slip'
+    )
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -1977,7 +2066,7 @@ def render_dashboard(
   {FAVICON_LINK}
   <meta name="theme-color" content="#080f14">
   {refresh_meta}
-  <title>Hawknetic Predictions · Research Builder</title>
+  <title>Hawknetic Predictions · Market Review</title>
   <link rel="stylesheet" href="{STYLESHEET.url}">
 </head>
 <body data-paper="{html.escape(payload_json, quote=True)}">
@@ -1986,12 +2075,7 @@ def render_dashboard(
     <button class="mobile-menu-toggle" id="mobile-menu-toggle" type="button" aria-controls="app-sidebar" aria-expanded="false"><span></span><span></span><span></span><span class="sr-only">Open navigation</span></button>
     {render_brand()}
     <nav class="top-navigation" aria-label="Primary navigation">
-      <a href="#builder">Builder</a>
-      <a href="#record">History</a>
-      <a href="#research-edge">Strategies</a>
-      <a href="#quality">Alerts</a>
-      <a href="#market-browser">Markets</a>
-      <a href="#record">Resources</a>
+      <a href="#builder">Review</a>
       <a href="#market-browser">Contracts</a>{operator_navigation_html}
     </nav>
     <div class="topbar-actions">
@@ -2004,27 +2088,9 @@ def render_dashboard(
   <div class="app-frame">
     <aside class="app-sidebar" id="app-sidebar">
       <div class="sidebar-section">
-        <span class="sidebar-label">Sports</span>
-        <div class="sport-filter-list" aria-label="Filter sports board">
-          <button type="button" class="sport-filter active" data-league="all"><span aria-hidden="true">◉</span>All sports<b>{sports_summary["event_count"]}</b></button>
-          {league_buttons}
-        </div>
-      </div>
-      <div class="sidebar-section">
-        <span class="sidebar-label">Filters</span>
-        <label class="sidebar-select"><span>Date</span><select aria-label="Event date"><option>Today</option></select></label>
-        <label class="sidebar-select"><span>League</span><select aria-label="League"><option>All leagues</option></select></label>
-        <label class="sidebar-select"><span>Market</span><select aria-label="Market type"><option>All markets</option></select></label>
-      </div>
-      <div class="sidebar-section">
-        <span class="sidebar-label">Research</span>
-        <nav class="side-navigation" aria-label="Research views">
-          <a href="#market-browser"><span aria-hidden="true">◇</span>Exact combos <b>{verified_contracts}</b></a>
-          <a href="#quality"><span aria-hidden="true">◉</span>Source health</a>
-          <a href="#record"><span aria-hidden="true">↗</span>Track record</a>
         <span class="sidebar-label">Workspace</span>
-        <nav class="side-navigation" aria-label="Builder views">
-          <a href="#builder">{icon("builder")}<span>Kalshi builder</span></a>
+        <nav class="side-navigation" aria-label="Review views">
+          <a href="#builder">{icon("builder")}<span>Kalshi review</span></a>
           <a href="#market-browser">{icon("contracts")}<span>Live contracts</span><b>{len(markets)}</b></a>
           <a href="#primary">{icon("slip")}<span>80c+ review</span><b>{int(primary_slip.get("leg_count") or 0)}</b></a>
           <a href="#leverage">{icon("slip")}<span>75c+ review</span><b>{int(leverage_slip.get("leg_count") or 0)}</b></a>
@@ -2045,17 +2111,9 @@ def render_dashboard(
 
     <main class="workspace">
       <section class="workspace-hero" id="builder">
-        <div>
-          <p class="eyebrow">Live Kalshi prediction builder · research only</p>
-          <h1>Build your prediction research.</h1>
-          <p class="hero-tagline">Fresh market data, manual review packets, no account automation. Compare live sports prices and inspect exact Kalshi combinations.</p>
-        </div>
-        <div class="workspace-meta">
-          <span><small>Updated</small><strong>{generated_at_html}</strong></span>
-          <span><small>Refresh cadence</small><strong>{html.escape(refresh_label)}</strong></span>
         <div class="hero-top">
           <div>
-            <p class="eyebrow">Live Kalshi prediction builder</p>
+            <p class="eyebrow">Live Kalshi market review</p>
             <h1>Review Kalshi markets before the slip.</h1>
             <p class="hero-tagline">Fresh market data, manual review packets, no account automation.</p>
           </div>
@@ -2069,94 +2127,51 @@ def render_dashboard(
           <div><strong>{data_label}</strong><p>{html.escape(data_message if not data_is_ready else snapshot_source + ' is current.')}</p></div>
         </div>
         {refresh_error_html}
-        <div class="builder-stat-grid" aria-label="Current builder summary">
-          <span><small>Live games</small><strong>{sports_summary["event_count"]}</strong></span>
-          <span><small>Markets scanned</small><strong>{len(markets)}</strong></span>
-          <span><small>Exact combos today</small><strong>{verified_contracts}</strong></span>
-          <span><small>Public combo quotes</small><strong>{tradable_contracts}</strong></span>
+        <div class="stat-grid{'' if viewer_sees_operations else ' is-pair'}" role="group" aria-label="Current review summary">
+          {summary_cards_html}
         </div>
-        <div class="builder-toolbar" role="search">
-          <label class="builder-search"><span aria-hidden="true">⌕</span><input id="market-search" type="search" placeholder="Search teams, events, or markets…" aria-label="Search live markets"></label>
-          <div class="date-tabs" aria-label="Date selection"><button type="button" class="active">Today</button><button type="button">Upcoming</button><button type="button">Popular</button></div>
-          <span class="toolbar-live"><i aria-hidden="true"></i>Live source data</span>
-        <div class="stat-grid" role="group" aria-label="Current builder summary">
-          <div class="stat-card"><small>Games loaded</small><strong>{len(games)}</strong></div>
-          <div class="stat-card"><small>Combo contracts</small><strong>{len(markets)}</strong></div>
-          <div class="stat-card"><small>Verified today</small><strong>{verified_contracts}</strong><span class="stat-foot">Confirmed live on Kalshi today</span></div>
-          <div class="stat-card {'is-accent' if ready_tiers else 'is-warning'}"><small>Review tiers ready</small><strong>{ready_tiers}/{tier_total}</strong></div>
-        </div>
-      </section>
-
-      <section class="panel builder-board-panel" id="sports-board">
-        <div class="section-head">
-          <div><span class="section-label">{sports_state_label}</span><h2>Sports market board</h2></div>
-          <p>{sports_summary_text}</p>
-        </div>
-        {render_sports_section(sports_board)}
-          <div><span class="section-label">Builder status</span><h2>Today's review slips</h2></div>
-          <p>Only contracts listed on Kalshi right now, at prices quoted just now.</p>
-        </div>
-        {render_visual_section(payload, include_research_scout=viewer_sees_operations, show_dollar_figures=viewer_sees_dollar_figures)}
-      </section>
-
-      <section class="panel" id="market-browser">
-        <div class="section-head">
-          <div><span class="section-label">Source-backed</span><h2>Live Kalshi contract browser · exact combination watchlist</h2></div>
-          <p>{len(markets)} exact contracts · {rfq_contracts} awaiting RFQ · {tradable_contracts} publicly quoted.</p>
-          <div><span class="section-label">Live market</span><h2>Kalshi contracts</h2></div>
-          <p>{len(markets)} combo contracts open for review right now.</p>
-        </div>
-        {render_market_browser(payload)}
       </section>
 
       <section class="panel" id="map">
         <div class="section-head">
-          <div><span class="section-label">Builder status</span><h2>Today's review tiers</h2></div>
-          <p>Only exact listed contracts with fresh source evidence appear.</p>
+          <div><span class="section-label">Review status</span><h2>Today's review slips</h2></div>
+          <p>Only contracts listed on Kalshi right now, at prices quoted just now.</p>
         </div>
-        {render_visual_section(payload)}
+        {render_visual_section(payload, include_research_scout=viewer_sees_operations, show_dollar_figures=viewer_sees_dollar_figures, analysis_reports=analysis_reports)}
       </section>
 
-      <section class="panel" id="quality">
+      <section class="panel" id="market-browser">
         <div class="section-head">
-          <div><span class="section-label">Freshness gate</span><h2>Live Status</h2></div>
-          <p>Stale or failed sources automatically hide review slips.</p>
+          <div><span class="section-label">Live market</span><h2>Kalshi contracts</h2></div>
+          <p>{html.escape(market_browser_summary)}</p>
         </div>
-        {render_quality_panel(quality_status, public_data_gate)}
+        {render_market_browser(payload)}
       </section>
 
-      <section class="panel" id="record">
-        <div class="section-head">
-          <div><span class="section-label">Research only</span><h2>Track Record</h2></div>
-          <p>Settled, resolved, and de-duplicated exposures only.</p>
-        </div>
-        {render_research_record_panel(research_record)}
-      </section>
-
-      <section class="panel slip-detail-panel" id="primary">
       <section class="panel" id="primary">
         <div class="section-head"><div><span class="section-label">Primary review</span><h2>80c+ Market Tier</h2></div><p>Higher-price exact combo legs</p></div>
-        {render_slip_section(primary_slip, "80c+ MARKET TIER", "primary", payload, show_dollar_figures=viewer_sees_dollar_figures)}
+        {render_slip_section(primary_slip, "80c+ MARKET TIER", "primary", payload, show_dollar_figures=viewer_sees_dollar_figures, analysis_report=analysis_reports.get("primary"))}
       </section>
 
       <section class="panel" id="leverage">
         <div class="section-head"><div><span class="section-label">Expanded review</span><h2>75c+ Market Tier</h2></div><p>More variance; same evidence requirements</p></div>
-        {render_slip_section(leverage_slip, "75c+ MARKET TIER", "leverage", payload, show_dollar_figures=viewer_sees_dollar_figures)}
+        {render_slip_section(leverage_slip, "75c+ MARKET TIER", "leverage", payload, show_dollar_figures=viewer_sees_dollar_figures, analysis_report=analysis_reports.get("leverage"))}
       </section>
 
       <section class="panel" id="all-day">
         <div class="section-head"><div><span class="section-label">All-day review</span><h2>All-Day 75-85c Tier</h2></div><p>Verified compatible contracts only</p></div>
-        {render_slip_section(all_day_slip, "ALL-DAY 75-85c TIER", "all_day", payload, show_dollar_figures=viewer_sees_dollar_figures)}
+        {render_slip_section(all_day_slip, "ALL-DAY 75-85c TIER", "all_day", payload, show_dollar_figures=viewer_sees_dollar_figures, analysis_report=analysis_reports.get("all_day"))}
       </section>
       {operator_panels_html}
     </main>
 
-    <aside class="prediction-drawer" aria-label="Current prediction slip">
+    <aside class="prediction-drawer" id="prediction-drawer" aria-labelledby="prediction-drawer-title">
       <div class="drawer-header">
-        <div><span class="section-label">Live research</span><h2>Your research watchlist</h2></div>
-        <a href="#market-browser" aria-label="Open exact combinations">↗</a>
+        <div><span class="section-label">Current review</span><h2 id="prediction-drawer-title" tabindex="-1">Your prediction slip</h2></div>
+        <a href="#primary" aria-label="Open full primary slip">↗</a>
+        <button class="btn btn-tertiary btn-sm" id="close-prediction-drawer" type="button" hidden>Close slip</button>
       </div>
-      {render_compact_slip(primary_slip, payload, show_dollar_figures=viewer_sees_dollar_figures)}
+      {render_compact_slip(primary_slip, payload, show_dollar_figures=viewer_sees_dollar_figures, analysis_report=analysis_reports.get("primary"))}
       <div class="drawer-trust-card">
         <span aria-hidden="true">✓</span>
         <div><strong>Every leg is checked</strong><p>Each one shows its Kalshi ticker, its price, and when that price was quoted.</p></div>
@@ -2164,12 +2179,12 @@ def render_dashboard(
     </aside>
   </div>
 
+  <button class="mobile-slip-toggle" id="mobile-slip-toggle" type="button" aria-expanded="false" aria-controls="prediction-drawer" hidden>
+    <span class="badge {'good' if drawer_ready else 'warning'}">{'Review slip' if drawer_ready else 'Waiting'}</span>
+    <span>{html.escape(drawer_summary)}</span>
+    <span aria-hidden="true">↑</span>
+  </button>
   <nav class="mobile-bottom-nav" aria-label="Mobile navigation">
-    <a href="#builder"><span aria-hidden="true">⌁</span>Builder</a>
-    <a href="#record"><span aria-hidden="true">↗</span>History</a>
-    <a href="#research-edge"><span aria-hidden="true">✦</span>Strategies</a>
-    <a href="#quality"><span aria-hidden="true">◉</span>Alerts</a>
-    <a href="#market-browser"><span aria-hidden="true">•••</span>More</a>
     {mobile_navigation_html}
   </nav>
   <script src="{SCRIPT.url}" defer></script>
@@ -2184,6 +2199,7 @@ def render_slip_section(
     source_payload: dict | None = None,
     *,
     show_dollar_figures: bool = True,
+    analysis_report: dict | None = None,
 ) -> str:
     """One tier's slip card.
 
@@ -2249,7 +2265,8 @@ def render_slip_section(
         review_text = review_packet.get("copy_blocks", {}).get("review_packet") or fallback_copy_text
         ticker_stack = review_packet.get("copy_blocks", {}).get("ticker_stack") or ""
         try:
-            analysis_report = build_slip_analysis(slip_payload, slip_key, stake=DEFAULT_SLIP_STAKE_DOLLARS)
+            if analysis_report is None:
+                analysis_report = build_slip_analysis(slip_payload, slip_key, stake=DEFAULT_SLIP_STAKE_DOLLARS)
             analysis_html = render_slip_analysis(analysis_report, show_dollar_figures=show_dollar_figures)
             # Set only once the block has rendered: a report that exists but
             # fails to render falls through to the unavailable block below,
@@ -2283,7 +2300,7 @@ def render_slip_section(
         if max_leg_probability is not None
         else f"{float(slip.get('min_leg_probability') or 0) * 100:.0f}%"
     )
-    combo_probability_label = "Research Estimate" if slip_key == "research_edge" else "Implied Combo"
+    combo_probability_label = "Research Estimate" if slip_key == "research_edge" else "Market implied"
     combo_chance_text, combo_chance_range = combo_probability_display(slip)
     payout_cell = (
         f'<span><small>Est. $5 Payout</small><strong>${money(slip.get("estimated_payout_if_right"))}</strong></span>'
@@ -2348,6 +2365,12 @@ _VERDICT_LABELS = {
 }
 
 _RISK_CLASS = {"low": "badge-neutral", "moderate": "badge-neutral", "high": "warning", "very_high": "warning"}
+_FRAGILITY_LABELS = {
+    "low": "Few moving parts",
+    "moderate": "Some fragility",
+    "high": "Fragile",
+    "very_high": "Very fragile",
+}
 
 
 def render_slip_analysis(report: dict, *, show_dollar_figures: bool = True) -> str:
@@ -2404,7 +2427,10 @@ def render_slip_analysis(report: dict, *, show_dollar_figures: bool = True) -> s
     # listed-contract strip beside this block shows the combo contract's own
     # price. They are different instruments and legitimately differ, but sitting
     # adjacent and unlabelled they read as the page contradicting itself.
-    notes = ["Break-even is computed from the individual leg prices; the listed combo contract can be priced above or below them."]
+    notes = [
+        "Break-even is computed from the individual leg prices; the listed combo contract can be priced above or below them.",
+        "Fragility reflects leg count, correlation, and estimated hit probability.",
+    ]
     skipped = report.get("skipped_legs") or []
     if skipped:
         reasons = ", ".join(f'{item["leg_id"]} ({item["reason"]})' for item in skipped)
@@ -2460,13 +2486,13 @@ def render_slip_analysis(report: dict, *, show_dollar_figures: bool = True) -> s
         <span class="section-kicker">Estimate vs. price</span>
         <div class="slip-analysis-badges">
           <span class="badge {verdict_class}">{html.escape(verdict_label)}</span>
-          <span class="badge {_RISK_CLASS.get(risk, "badge-neutral")}">{html.escape(risk.replace("_", " "))} risk</span>
+          <span class="badge {_RISK_CLASS.get(risk, "badge-neutral")}">{_FRAGILITY_LABELS.get(risk, "Fragility unknown")}</span>
         </div>
       </div>
       <div class="metric-strip">
-        <span><small>Needs to hit</small><strong>{break_even * 100:.2f}%</strong></span>
         <span><small>Estimated to hit</small><strong>{hit * 100:.{hit_decimals}f}%</strong>{hit_range}</span>
-        <span class="{'delta-up' if edge > 0 else 'delta-down'}"><small>Difference</small><strong>{edge * 100:+.{hit_decimals}f}%</strong></span>
+        <span><small>Needs to hit</small><strong>{break_even * 100:.2f}%</strong></span>
+        <span class="{'delta-up' if edge > 0 else 'delta-down'}"><small>Difference</small><strong>{probability_points(edge, hit_decimals)}</strong></span>
         {ev_cell}
       </div>
       {note_html}
@@ -2533,7 +2559,7 @@ def render_leg_breakdown(analysis: dict) -> str:
               <th scope="row">{html.escape(selection)}<small>{html.escape(str(leg.get("league") or ""))}</small></th>
               <td data-label="Ask / break-even">{break_even * 100:.1f}c</td>
               <td data-label="Estimated">{fair * 100:.1f}%</td>
-              <td data-label="Difference" class="{'delta-up' if round(edge, 9) > 0 else 'delta-down'}">{edge * 100:+.1f}%</td>
+              <td data-label="Difference" class="{'delta-up' if round(edge, 9) > 0 else 'delta-down'}">{probability_points(edge)}</td>
               <td data-label="Read"><span class="badge {css_class}">{html.escape(label)}</span></td>
             </tr>
             """
@@ -2604,7 +2630,8 @@ def render_slip_leg(leg: dict) -> str:
 
 
 def render_visual_section(
-    payload: dict, *, include_research_scout: bool = True, show_dollar_figures: bool = True
+    payload: dict, *, include_research_scout: bool = True, show_dollar_figures: bool = True,
+    analysis_reports: dict | None = None,
 ) -> str:
     """The tier summary, over the tiers the viewer can actually open.
 
@@ -2615,20 +2642,20 @@ def render_visual_section(
     literal, so gating a tier cannot leave the total behind again.
     """
     tiers = [
-        ("80c+ Market", "primary", payload.get("custom_slip") or {}, "market-implied"),
-        ("75c+ Market", "leverage", payload.get("leverage_slip") or {}, "market-implied"),
-        ("All-Day 75-85c", "all-day", payload.get("all_day_slip") or {}, "market-implied"),
+        ("80c+ Market", "primary", payload.get("custom_slip") or {}),
+        ("75c+ Market", "leverage", payload.get("leverage_slip") or {}),
+        ("All-Day 75-85c", "all_day", payload.get("all_day_slip") or {}),
     ]
     if include_research_scout:
         tiers.append(
-            ("Research Scout", "research", payload.get("research_edge_slip") or {}, "research estimate")
+            ("Research Scout", "research_edge", payload.get("research_edge_slip") or {})
         )
     cards = []
     built_count = 0
     total_legs = 0
     source_ready = (payload.get("public_data_gate") or {}).get("status") == "ready"
     source_context = combo_source_context(payload)
-    for name, tier_class, slip, probability_kind in tiers:
+    for name, slip_key, slip in tiers:
         is_built = slip_is_built(slip)
         if is_built:
             built_count += 1
@@ -2639,9 +2666,12 @@ def render_visual_section(
         # One line on a small tile, so the band does not fit -- but the figure
         # must not claim two decimals it has not got just because there is no
         # room to qualify it. The card beside this one carries the interval.
-        chance_text, _ = combo_probability_display(slip)
+        report = (analysis_reports or {}).get(slip_key)
+        if report is None:
+            report = slip_analysis_report(slip, payload, slip_key)
+        chance_text, _ = slip_estimate_display(report)
         subline = (
-            f"{chance_text} {probability_kind}"
+            f"Estimated to hit {chance_text}"
             if is_built
             else ("No qualifying legs" if source_ready else "Waiting for fresh data")
         )
@@ -2689,8 +2719,6 @@ def combo_source_context(source_payload: dict | None, slip_key: str | None = Non
     summary = (source_payload or {}).get("combo_source_summary") or {}
     active_count = int(summary.get("active_kxmve_market_count") or 0)
     verified_count = int(summary.get("verified_current_day_contract_count") or 0)
-    tradable_count = int(summary.get("tradable_kxmve_market_count") or 0)
-    rfq_count = int(summary.get("rfq_required_kxmve_market_count") or 0)
     if not active_count:
         return ""
     # The counts are worth showing -- they say how much of today's board got
@@ -2700,11 +2728,15 @@ def combo_source_context(source_payload: dict | None, slip_key: str | None = Non
     # already use.
     base = (
         f"Kalshi has {active_count} combo contracts open; "
-        f"{verified_count} are confirmed for today's games; "
-        f"{tradable_count} have a live combo price."
+        f"{verified_count} are confirmed for today's games."
     )
+    # "Confirmed for today" and "you can actually buy it" are different
+    # questions, and a contract can pass the first and fail the second. Saying
+    # only the first number invites a reader to go looking for a price that is
+    # not there.
+    rfq_count = int(summary.get("rfq_required_kxmve_market_count") or 0)
     if rfq_count:
-        base += f" {rfq_count} need an authenticated Kalshi request before a price exists."
+        base += f" {rfq_count} have no public price until someone requests a quote."
     if not slip_key:
         return base
     tier = (summary.get("tiers") or {}).get(slip_key) or {}
@@ -2713,9 +2745,12 @@ def combo_source_context(source_payload: dict | None, slip_key: str | None = Non
     if eligible_count:
         return f"{base} {eligible_count} fit this tier."
     if watchlist_count:
+        # Not the same as "none fit". These match the tier's rules on every leg
+        # and are held back only by the missing combo price, so the honest
+        # answer is a watchlist rather than an empty tier.
         return (
-            f"{base} {watchlist_count} fit this tier's leg rules but have no combo price yet, "
-            "so they stay on the watchlist."
+            f"{base} {watchlist_count} match this tier's rules on every leg, but stay "
+            "watchlist-only until an RFQ supplies an executable combo price."
         )
     return f"{base} None fit this tier, so there is nothing to show here."
 
@@ -2740,11 +2775,18 @@ def source_age_text(age: object) -> str:
     page and an unparseable field should not take the page down with it.
     """
 
-    if age in {None, ""}:
+    # `age in {None, ""}` was the obvious way to write this and it hashes what
+    # it is handed, so a list or a dict raised TypeError before reaching the
+    # fallback below -- the one line meant to keep bad metadata off this page
+    # was itself a way for bad metadata to take it down.
+    if age is None or (isinstance(age, str) and not age):
         return "Age unknown"
     try:
         age_seconds = max(0, int(float(age)))  # type: ignore[arg-type]
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        # OverflowError, not just the parse failures: `int(float("inf"))` and
+        # `float(10 ** 400)` both raise it, and neither is a TypeError or a
+        # ValueError.
         return "Age unknown"
     if age_seconds < 60:
         return f"{age_seconds}s old"
@@ -3132,6 +3174,12 @@ class PaperHandler(BaseHTTPRequestHandler):
                     "status": gate.get("status"),
                     "code": gate.get("code"),
                     "data_age_seconds": gate.get("data_age_seconds"),
+                    # The gate writes a different sentence for each way it
+                    # blocks -- a missing timestamp is not a stale source is not
+                    # an ordinary stale payload. The poller had only a generic
+                    # "Data is stale" to show, so a reader was told the one
+                    # thing that happened to be least often true.
+                    "message": gate.get("message"),
                 }
             )
             return
@@ -3815,2381 +3863,3 @@ def run_server(
     if PaperHandler.refresh_seconds:
         print(f"Auto-refreshing every {PaperHandler.refresh_seconds} seconds.")
     server.serve_forever()
-
-
-CSS = r"""
-/* Production product UI: restrained, operational, and domain-specific. */
-:root {
-  --background: #0b0f12;
-  --surface: #11171b;
-  --surface-raised: #151d21;
-  --surface-muted: #0f1518;
-  --border: #2a363b;
-  --border-strong: #405057;
-  --text-primary: #edf4f1;
-  --text-secondary: #b8c6c1;
-  --text-muted: #879893;
-  --accent: #29b779;
-  --accent-hover: #34c889;
-  --success: #29b779;
-  --warning: #d99a2b;
-  --danger: #e05d50;
-  --info: #5d9bc7;
-  --focus: #75b9e6;
-  --radius-sm: 4px;
-  --radius-md: 6px;
-  --radius-lg: 8px;
-  --space-1: 4px;
-  --space-2: 8px;
-  --space-3: 12px;
-  --space-4: 16px;
-  --space-5: 20px;
-  --space-6: 24px;
-}
-*,
-*::before,
-*::after {
-  box-sizing: border-box;
-}
-html { scroll-padding-top: 72px; }
-h1,
-h2,
-h3,
-p {
-  margin: 0;
-}
-a {
-  color: inherit;
-}
-body {
-  background: var(--background) !important;
-  color: var(--text-primary);
-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
-  font-size: 14px;
-  line-height: 1.45;
-}
-body::before,
-.hero::after,
-.panel::after,
-.panel::before {
-  display: none !important;
-}
-.skip-link {
-  position: fixed;
-  left: 12px;
-  top: 8px;
-  z-index: 100;
-  transform: translateY(-140%);
-  border: 1px solid var(--focus);
-  border-radius: var(--radius-md);
-  padding: 8px 10px;
-  background: var(--surface-raised);
-  color: var(--text-primary);
-}
-.skip-link:focus { transform: translateY(0); }
-.hero,
-.quick-nav,
-main {
-  width: min(1360px, calc(100% - 32px)) !important;
-}
-.hero {
-  grid-template-columns: minmax(0, 1fr) 292px !important;
-  gap: var(--space-5);
-  margin-top: var(--space-4);
-  padding: var(--space-5) var(--space-6);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg) !important;
-  background: var(--surface) !important;
-  box-shadow: none !important;
-}
-.eyebrow {
-  margin-bottom: var(--space-2);
-  color: var(--text-muted);
-  font-size: 11px;
-  font-weight: 800;
-  letter-spacing: .08em;
-  text-transform: uppercase;
-}
-.eyebrow::before { display: none; }
-h1 {
-  margin: 0;
-  color: var(--text-primary);
-  font-size: clamp(30px, 4vw, 44px);
-  line-height: 1.04;
-  letter-spacing: 0;
-}
-h2 {
-  color: var(--text-primary);
-  font-size: 18px;
-  line-height: 1.25;
-  letter-spacing: 0;
-}
-h3 {
-  color: var(--text-primary);
-  font-size: 13px;
-  line-height: 1.3;
-  letter-spacing: 0;
-}
-.hero-tagline {
-  max-width: 680px;
-  margin-top: var(--space-2);
-  color: var(--text-secondary);
-  font-size: 14px;
-  font-weight: 500;
-  letter-spacing: 0;
-}
-.hero-meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-2);
-  margin-top: var(--space-4);
-}
-.hero-meta > span,
-.metric-strip span,
-.update-line,
-.quote-grid span,
-.prob-grid span {
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: var(--surface-muted);
-}
-.hero-meta > span {
-  padding: 7px 9px;
-}
-.hero-meta small,
-.metric-strip small,
-.record-rate small,
-.packet-note,
-.section-kicker,
-.league-title span,
-.leg-details dt {
-  color: var(--text-muted);
-  font-size: 10px;
-  font-weight: 800;
-  letter-spacing: .06em;
-  text-transform: uppercase;
-}
-.hero-meta strong,
-.metric-strip strong,
-.update-line strong {
-  color: var(--text-primary);
-  font-variant-numeric: tabular-nums;
-}
-.refresh-box {
-  display: grid;
-  grid-template-columns: 1fr auto;
-  gap: var(--space-2);
-  align-items: center;
-  padding: var(--space-3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg) !important;
-  background: var(--surface-muted) !important;
-  box-shadow: none !important;
-}
-.live-badge {
-  color: var(--text-secondary);
-  font-size: 12px;
-  font-weight: 700;
-}
-.live-badge i {
-  background: var(--success);
-  box-shadow: none;
-}
-.live-badge.blocked {
-  color: var(--warning);
-}
-.live-badge.blocked i {
-  background: var(--warning);
-}
-#refresh-slip {
-  min-height: 44px;
-  min-width: 104px;
-}
-#refresh-status {
-  grid-column: 1 / -1;
-  color: var(--text-muted);
-  text-align: left;
-}
-#refresh-status.good { color: var(--success); }
-#refresh-status.warning { color: var(--warning); }
-#refresh-status.bad { color: var(--danger); }
-.data-state-message {
-  grid-column: 1 / -1;
-  color: var(--text-secondary);
-  font-size: 12px;
-}
-button,
-.packet-download {
-  min-height: 44px;
-  border-radius: var(--radius-md) !important;
-  font: inherit;
-  font-weight: 750;
-}
-button:not(.ghost):not(.compact-copy),
-.primary-copy {
-  border: 1px solid var(--accent);
-  background: var(--accent) !important;
-  color: #06100c !important;
-  box-shadow: none !important;
-}
-button:hover,
-.packet-download:hover,
-.quick-nav a:hover {
-  transform: none !important;
-}
-button:not(.ghost):not(.compact-copy):hover,
-.primary-copy:hover {
-  background: var(--accent-hover) !important;
-}
-button.copy,
-.compact-copy,
-.packet-download {
-  border: 1px solid var(--border);
-  background: var(--surface-muted) !important;
-  color: var(--text-primary) !important;
-}
-button:focus-visible,
-a:focus-visible,
-summary:focus-visible,
-input:focus-visible,
-select:focus-visible,
-textarea:focus-visible {
-  outline: 2px solid var(--focus);
-  outline-offset: 2px;
-}
-.quick-nav {
-  position: sticky;
-  top: 0;
-  z-index: 10;
-  display: flex !important;
-  width: min(1360px, calc(100% - 32px)) !important;
-  gap: 0;
-  margin-top: var(--space-3);
-  padding: 0;
-  overflow-x: auto !important;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg) !important;
-  background: #0d1316 !important;
-  box-shadow: none !important;
-}
-.quick-nav a {
-  display: grid;
-  align-items: center;
-  flex: 0 0 auto;
-  min-height: 44px;
-  min-width: 92px;
-  border-right: 1px solid var(--border);
-  border-radius: 0 !important;
-  padding: 10px 12px;
-  color: var(--text-secondary);
-  font-size: 12px;
-  font-weight: 750;
-  text-align: center;
-  text-decoration: none;
-}
-.quick-nav a:last-child { border-right: 0; }
-.quick-nav a:hover {
-  background: var(--surface-raised);
-  color: var(--text-primary);
-}
-.quick-nav a[aria-current="location"] {
-  background: var(--surface-raised);
-  box-shadow: inset 0 -2px 0 var(--accent);
-  color: var(--text-primary);
-}
-main {
-  display: grid;
-  gap: var(--space-4);
-  padding: var(--space-4) 0 var(--space-6);
-}
-.panel,
-.card,
-.decision,
-.slip-card,
-.league-block,
-.map-card,
-.slip-summary {
-  border: 1px solid var(--border) !important;
-  border-radius: var(--radius-lg) !important;
-  background: var(--surface) !important;
-  box-shadow: none !important;
-  clip-path: none !important;
-  backdrop-filter: none !important;
-}
-.panel {
-  padding: var(--space-5);
-  overflow: visible;
-}
-.section-head {
-  display: flex;
-  gap: var(--space-4);
-  justify-content: space-between;
-  align-items: baseline;
-  margin-bottom: var(--space-4);
-  padding-bottom: var(--space-3);
-  border-bottom: 1px solid var(--border);
-}
-.section-head p {
-  max-width: 520px;
-  color: var(--text-muted);
-  font-size: 12px;
-  font-weight: 600;
-  letter-spacing: 0;
-  text-align: right;
-  text-transform: none;
-}
-.slip-map {
-  display: grid;
-  grid-template-columns: 220px minmax(0, 1fr);
-  gap: var(--space-3);
-  align-items: stretch;
-}
-.slip-summary {
-  display: grid;
-  align-content: start;
-  gap: var(--space-2);
-  padding: var(--space-4);
-}
-.slip-summary span,
-.map-card-head span {
-  color: var(--text-muted);
-  font-size: 11px;
-  font-weight: 800;
-  letter-spacing: .06em;
-  text-transform: uppercase;
-}
-.slip-summary strong {
-  color: var(--text-primary);
-  font-size: 42px;
-  line-height: 1;
-  font-variant-numeric: tabular-nums;
-}
-.slip-summary small {
-  color: var(--text-secondary);
-}
-.map-panel {
-  display: grid;
-  gap: var(--space-3);
-}
-.map-cards {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: var(--space-3);
-}
-.map-card {
-  display: grid;
-  gap: var(--space-3);
-  min-height: 128px;
-  padding: var(--space-4);
-}
-.map-card-head {
-  display: flex;
-  justify-content: space-between;
-  gap: var(--space-2);
-  align-items: center;
-}
-.map-card-head strong {
-  color: var(--success);
-  font-size: 11px;
-  font-weight: 800;
-}
-.map-count {
-  display: flex !important;
-  gap: var(--space-2) !important;
-  justify-content: flex-start !important;
-  align-items: baseline;
-}
-.map-count strong {
-  color: var(--text-primary);
-  font-size: 34px;
-  line-height: 1;
-  font-variant-numeric: tabular-nums;
-  letter-spacing: 0;
-}
-.map-count em {
-  color: var(--text-muted);
-  font-size: 11px;
-  font-style: normal;
-  font-weight: 800;
-  text-transform: uppercase;
-}
-.map-meta {
-  display: grid !important;
-  gap: 2px !important;
-  color: var(--text-secondary) !important;
-}
-.map-meta small {
-  color: var(--text-secondary);
-  font-size: 11px;
-}
-.update-line {
-  display: flex;
-  justify-content: space-between;
-  gap: var(--space-3);
-  padding: var(--space-3);
-}
-.decision {
-  padding: var(--space-4);
-}
-.decision.good { border-color: color-mix(in srgb, var(--success) 40%, var(--border)) !important; }
-.decision.warning { border-color: color-mix(in srgb, var(--warning) 48%, var(--border)) !important; }
-.status-heading,
-.record-heading {
-  display: flex;
-  justify-content: space-between;
-  gap: var(--space-3);
-  align-items: center;
-}
-.status-heading strong,
-.record-rate strong {
-  color: var(--text-primary);
-  font-size: 24px;
-  font-variant-numeric: tabular-nums;
-  letter-spacing: 0;
-}
-.status-heading span,
-.record-heading > span:last-child,
-.record-rate span {
-  color: var(--text-muted);
-}
-.status-note {
-  max-width: 760px;
-  margin-top: var(--space-2);
-  color: var(--text-secondary);
-  font-size: 12px;
-}
-.metric-strip {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: var(--space-2);
-  margin: var(--space-3) 0;
-}
-.metric-strip span {
-  padding: var(--space-3);
-}
-.metric-strip strong {
-  display: block;
-  margin-top: 3px;
-  font-size: 17px;
-  letter-spacing: 0;
-}
-.record-grid,
-.cards {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
-  gap: var(--space-3);
-}
-.card {
-  padding: var(--space-4);
-}
-.pill {
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: 3px 7px;
-  background: var(--surface-muted);
-  color: var(--text-secondary);
-  font-size: 11px;
-  font-weight: 750;
-}
-.pill.good { color: var(--success); border-color: color-mix(in srgb, var(--success) 42%, var(--border)); }
-.pill.warning { color: var(--warning); border-color: color-mix(in srgb, var(--warning) 48%, var(--border)); }
-.slip-card {
-  padding: var(--space-4);
-}
-.slip-card.empty strong {
-  color: var(--warning);
-  font-size: 20px;
-}
-.slip-topline {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: var(--space-4);
-  align-items: start;
-}
-.section-kicker {
-  display: block;
-  color: var(--text-muted);
-}
-.slip-count {
-  display: flex;
-  gap: var(--space-2);
-  align-items: baseline;
-  margin-top: 6px;
-}
-.slip-count strong {
-  margin: 0;
-  color: var(--text-primary);
-  font-size: 36px;
-  line-height: 1;
-  font-variant-numeric: tabular-nums;
-  letter-spacing: 0;
-}
-.slip-count span {
-  color: var(--text-muted);
-  font-size: 11px;
-  font-weight: 800;
-  text-transform: uppercase;
-}
-.slip-review-state {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-2);
-  align-items: center;
-  margin-top: var(--space-2);
-  color: var(--text-secondary);
-  font-size: 12px;
-}
-.packet-actions {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(72px, 1fr));
-  gap: var(--space-2);
-  min-width: 420px;
-}
-.packet-actions button,
-.packet-download {
-  display: grid;
-  place-items: center;
-  text-align: center;
-  text-decoration: none;
-}
-.packet-note {
-  margin: var(--space-3) 0 0;
-  color: var(--text-muted);
-  letter-spacing: .03em;
-}
-.slip-groups {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr));
-  gap: var(--space-3);
-}
-.league-block {
-  padding: var(--space-3);
-  background: var(--surface-muted) !important;
-}
-.league-title {
-  display: flex;
-  justify-content: space-between;
-  gap: var(--space-2);
-  align-items: baseline;
-  margin-bottom: var(--space-2);
-}
-.league-title h3 {
-  font-size: 14px;
-}
-.slip-list {
-  display: grid;
-  gap: var(--space-2);
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-.slip-leg {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 92px;
-  gap: var(--space-2) var(--space-3);
-  align-items: start;
-  padding: var(--space-3);
-  border: 1px solid var(--border);
-  border-left: 3px solid var(--accent);
-  border-radius: var(--radius-md) !important;
-  background: var(--surface);
-}
-.leg-copy strong {
-  display: block;
-  color: var(--text-primary);
-  font-size: 13px;
-  line-height: 1.3;
-}
-.leg-copy > span {
-  display: block;
-  margin-top: 3px;
-  color: var(--text-secondary);
-  font-size: 12px;
-}
-.leg-chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-1);
-  margin-top: var(--space-2);
-}
-.leg-chips time,
-.leg-chips span {
-  display: inline-flex;
-  margin: 0;
-  padding: 3px 6px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--surface-muted);
-  color: var(--text-secondary);
-  font-size: 10px;
-  font-weight: 750;
-}
-.leg-chips time {
-  color: var(--text-primary);
-  border-color: var(--border-strong);
-}
-.leg-metrics {
-  min-width: 0;
-  text-align: right;
-}
-.leg-metrics b {
-  color: var(--text-primary);
-  font-size: 16px;
-  font-variant-numeric: tabular-nums;
-}
-.leg-metrics small {
-  color: var(--text-muted);
-  font-size: 10px;
-}
-.leg-details {
-  grid-column: 1 / -1;
-  padding-top: var(--space-2);
-  border-top: 1px solid var(--border);
-}
-.leg-details summary {
-  color: var(--text-muted);
-  cursor: pointer;
-  font-size: 11px;
-  font-weight: 750;
-}
-.leg-details[open] summary {
-  color: var(--info);
-}
-.leg-details code {
-  display: block;
-  margin-top: var(--space-2);
-  color: var(--text-secondary);
-  font-size: 11px;
-  overflow-wrap: anywhere;
-}
-.leg-details dl {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(90px, 1fr));
-  gap: var(--space-2);
-  margin: var(--space-2) 0 0;
-}
-.leg-details dl div {
-  padding: var(--space-2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: var(--surface-muted);
-}
-.leg-details dd {
-  margin: 2px 0 0;
-  color: var(--text-secondary);
-  font-size: 11px;
-}
-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-variant-numeric: tabular-nums;
-}
-th,
-td {
-  border-bottom: 1px solid var(--border);
-  padding: 9px 10px;
-  text-align: left;
-  vertical-align: top;
-}
-th {
-  color: var(--text-muted);
-  font-size: 11px;
-  font-weight: 800;
-  letter-spacing: .05em;
-  text-transform: uppercase;
-}
-td {
-  color: var(--text-secondary);
-}
-@media (prefers-reduced-motion: reduce) {
-  *,
-  *::before,
-  *::after {
-    scroll-behavior: auto !important;
-    transition: none !important;
-  }
-}
-@media (max-width: 1100px) {
-  .slip-map {
-    grid-template-columns: 1fr;
-  }
-  .map-cards {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-  .packet-actions {
-    min-width: 0;
-  }
-}
-@media (max-width: 760px) {
-  .hero,
-  .quick-nav,
-  main {
-    width: calc(100% - 20px) !important;
-  }
-  .hero {
-    grid-template-columns: 1fr !important;
-    gap: var(--space-4);
-    padding: var(--space-4);
-  }
-  .refresh-box {
-    grid-template-columns: 1fr;
-  }
-  #refresh-slip {
-    width: 100%;
-  }
-  .quick-nav a {
-    min-width: 84px;
-    padding: 9px 10px;
-  }
-  .panel {
-    padding: var(--space-4);
-  }
-  .section-head {
-    display: grid;
-    gap: var(--space-1);
-  }
-  .section-head p {
-    text-align: left;
-  }
-  .map-cards,
-  .metric-strip,
-  .record-metrics {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-  .slip-topline {
-    grid-template-columns: 1fr;
-  }
-  .packet-actions {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-  .slip-leg {
-    grid-template-columns: minmax(0, 1fr);
-  }
-  .leg-metrics {
-    text-align: left;
-  }
-}
-@media (max-width: 430px) {
-  .hero,
-  .quick-nav,
-  main {
-    width: calc(100% - 12px) !important;
-  }
-  h1 {
-    font-size: 28px;
-  }
-  .map-cards,
-  .metric-strip,
-  .record-metrics,
-  .packet-actions {
-    grid-template-columns: 1fr;
-  }
-  .map-card,
-  .slip-summary,
-  .slip-card,
-  .panel {
-    padding: var(--space-3);
-  }
-}
-
-/* Hawknetic Predictions vision shell. The existing report components remain
-   source-backed; these rules compose them into the product interface. */
-:root {
-  --background: #05090c;
-  --surface: #0a1115;
-  --surface-raised: #0e171c;
-  --surface-muted: #081014;
-  --surface-soft: #111c22;
-  --border: #1d2a30;
-  --border-strong: #304149;
-  --text-primary: #f2f8f5;
-  --text-secondary: #afbeb8;
-  --text-muted: #70817a;
-  --accent: #00e676;
-  --accent-deep: #00c853;
-  --accent-hover: #31ee91;
-  --purple: #7c4dff;
-  --amber: #ffb300;
-  --danger: #ff5252;
-  --info: #2196f3;
-  --focus: #66f2a7;
-  --radius-sm: 6px;
-  --radius-md: 10px;
-  --radius-lg: 14px;
-  --shadow-panel: 0 18px 55px rgba(0, 0, 0, .22);
-}
-html {
-  scroll-behavior: smooth;
-  scroll-padding-top: 84px;
-}
-body.product-shell {
-  min-width: 320px;
-  min-height: 100vh;
-  margin: 0;
-  background:
-    radial-gradient(circle at 78% -10%, rgba(0, 230, 118, .075), transparent 27rem),
-    radial-gradient(circle at 20% 35%, rgba(124, 77, 255, .035), transparent 30rem),
-    var(--background) !important;
-  color: var(--text-primary);
-}
-.sr-only {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  padding: 0;
-  margin: -1px;
-  overflow: hidden;
-  clip: rect(0, 0, 0, 0);
-  white-space: nowrap;
-  border: 0;
-}
-.app-topbar {
-  position: sticky;
-  top: 0;
-  z-index: 50;
-  display: grid;
-  grid-template-columns: 245px minmax(360px, 1fr) auto;
-  align-items: center;
-  min-height: 66px;
-  padding: 0 18px;
-  border-bottom: 1px solid var(--border);
-  background: rgba(5, 9, 12, .94);
-  box-shadow: 0 12px 32px rgba(0, 0, 0, .2);
-  backdrop-filter: blur(18px);
-}
-.brand {
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
-  width: max-content;
-  color: var(--text-primary);
-  font-size: 18px;
-  font-weight: 720;
-  letter-spacing: -.045em;
-  text-decoration: none;
-}
-.brand strong {
-  color: var(--accent);
-  font-weight: 720;
-}
-.brand-mark {
-  width: 35px;
-  height: 35px;
-  overflow: visible;
-  fill: var(--accent);
-  filter: drop-shadow(0 0 13px rgba(0, 230, 118, .25));
-}
-.brand-eye { fill: #04110a; }
-.product-shell .top-navigation {
-  position: static;
-  display: flex !important;
-  justify-content: center;
-  width: auto !important;
-  margin: 0 !important;
-  overflow: visible !important;
-  border: 0;
-  border-radius: 0 !important;
-  background: transparent !important;
-}
-.product-shell .top-navigation a {
-  position: relative;
-  min-width: auto;
-  min-height: 66px;
-  border: 0;
-  padding: 0 17px;
-  color: #899892;
-  font-size: 13px;
-  font-weight: 650;
-}
-.product-shell .top-navigation a:hover,
-.product-shell .top-navigation a[aria-current="location"] {
-  background: transparent;
-  color: var(--text-primary);
-  box-shadow: none;
-}
-.product-shell .top-navigation a::after {
-  position: absolute;
-  right: 17px;
-  bottom: 0;
-  left: 17px;
-  height: 2px;
-  border-radius: 999px 999px 0 0;
-  background: var(--accent);
-  content: "";
-  opacity: 0;
-  transform: scaleX(.4);
-  transition: opacity .18s ease, transform .18s ease;
-}
-.product-shell .top-navigation a:hover::after,
-.product-shell .top-navigation a[aria-current="location"]::after {
-  opacity: 1;
-  transform: scaleX(1);
-}
-.topbar-actions {
-  display: flex;
-  justify-content: flex-end;
-  align-items: center;
-  gap: 12px;
-}
-.research-only-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  min-height: 34px;
-  border: 1px solid rgba(0, 230, 118, .32);
-  border-radius: 9px;
-  padding: 0 11px;
-  background: rgba(0, 230, 118, .055);
-  color: #a7efc8;
-  font-size: 11px;
-  font-weight: 760;
-  letter-spacing: .035em;
-  text-transform: uppercase;
-}
-.research-only-badge i {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--accent);
-  box-shadow: 0 0 10px rgba(0, 230, 118, .7);
-}
-.refresh-control {
-  display: grid;
-  grid-template-columns: auto;
-  justify-items: end;
-}
-.refresh-control #refresh-slip {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 7px;
-  min-width: 104px;
-  min-height: 38px;
-  border-radius: 9px !important;
-  font-size: 12px;
-}
-.refresh-control #refresh-status {
-  position: absolute;
-  top: 49px;
-  color: var(--text-muted);
-  font-size: 9px;
-}
-.mobile-menu-toggle {
-  display: none;
-  width: 40px;
-  height: 40px;
-  min-height: 40px;
-  border: 1px solid var(--border) !important;
-  border-radius: 9px !important;
-  padding: 9px !important;
-  background: var(--surface) !important;
-}
-.mobile-menu-toggle > span:not(.sr-only) {
-  display: block;
-  width: 18px;
-  height: 1px;
-  margin: 4px auto;
-  background: var(--text-secondary);
-}
-.app-frame {
-  display: grid;
-  grid-template-columns: 210px minmax(560px, 1fr) 350px;
-  gap: 14px;
-  width: min(1920px, 100%);
-  margin: 0 auto;
-  padding: 14px;
-  align-items: start;
-}
-.app-sidebar,
-.prediction-drawer {
-  position: sticky;
-  top: 80px;
-  max-height: calc(100vh - 94px);
-  overflow: auto;
-  scrollbar-width: thin;
-  scrollbar-color: var(--border-strong) transparent;
-}
-.app-sidebar {
-  display: grid;
-  gap: 18px;
-  padding: 13px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  background: rgba(8, 16, 20, .9);
-  box-shadow: var(--shadow-panel);
-}
-.sidebar-section {
-  display: grid;
-  gap: 7px;
-}
-.sidebar-section + .sidebar-section {
-  padding-top: 14px;
-  border-top: 1px solid var(--border);
-}
-.sidebar-label,
-.section-label {
-  color: var(--text-muted);
-  font-size: 9px;
-  font-weight: 820;
-  letter-spacing: .115em;
-  text-transform: uppercase;
-}
-.sidebar-label { padding: 0 9px 4px; }
-.side-navigation {
-  display: grid;
-  gap: 3px;
-}
-.side-navigation a {
-  display: grid;
-  grid-template-columns: 22px minmax(0, 1fr) auto;
-  align-items: center;
-  min-height: 39px;
-  border: 1px solid transparent;
-  border-radius: 9px;
-  padding: 0 9px;
-  color: #93a39c;
-  font-size: 12px;
-  font-weight: 620;
-  text-decoration: none;
-}
-.side-navigation a > span {
-  color: #84938d;
-  font-size: 15px;
-}
-.side-navigation a b {
-  min-width: 20px;
-  border-radius: 999px;
-  padding: 2px 6px;
-  background: var(--surface-soft);
-  color: var(--text-muted);
-  font-size: 9px;
-  text-align: center;
-}
-.side-navigation a:hover,
-.side-navigation a.active {
-  border-color: rgba(0, 230, 118, .18);
-  background: linear-gradient(90deg, rgba(0, 230, 118, .12), rgba(0, 230, 118, .025));
-  color: var(--text-primary);
-}
-.side-navigation a:hover > span,
-.side-navigation a.active > span { color: var(--accent); }
-.sidebar-live-card,
-.sidebar-disclaimer {
-  display: grid;
-  gap: 7px;
-  border: 1px solid var(--border);
-  border-radius: 11px;
-  padding: 12px;
-  background: var(--surface-muted);
-}
-.sidebar-live-card[data-state="ready"] { border-color: rgba(0, 230, 118, .24); }
-.sidebar-live-card strong { font-size: 11px; }
-.sidebar-live-card small,
-.sidebar-disclaimer p {
-  color: var(--text-muted);
-  font-size: 10px;
-  line-height: 1.5;
-}
-.sidebar-live-card .data-state-message {
-  color: var(--text-muted);
-  font-size: 10px;
-}
-.sidebar-disclaimer strong {
-  color: var(--text-secondary);
-  font-size: 10px;
-  text-transform: uppercase;
-}
-.product-shell main.workspace {
-  display: grid;
-  gap: 14px;
-  width: auto !important;
-  min-width: 0;
-  padding: 0 0 34px;
-}
-.workspace-hero,
-.product-shell .panel,
-.prediction-drawer {
-  border: 1px solid var(--border) !important;
-  border-radius: var(--radius-lg) !important;
-  background: linear-gradient(145deg, rgba(14, 23, 28, .96), rgba(7, 14, 18, .98)) !important;
-  box-shadow: var(--shadow-panel) !important;
-}
-.workspace-hero {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 16px 22px;
-  padding: 22px;
-  overflow: hidden;
-}
-.workspace-hero h1 {
-  max-width: 780px;
-  margin-top: 4px;
-  font-size: clamp(27px, 3.2vw, 46px);
-  letter-spacing: -.04em;
-}
-.workspace-hero h1::after {
-  color: var(--accent);
-  content: "";
-}
-.workspace-hero .hero-tagline {
-  margin-top: 9px;
-  color: var(--text-secondary);
-  font-size: 13px;
-}
-.workspace-meta {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(118px, 1fr));
-  gap: 8px;
-  align-self: start;
-}
-.workspace-meta span,
-.builder-stat-grid span,
-.drawer-metrics span {
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: rgba(4, 10, 13, .7);
-}
-.workspace-meta span { padding: 9px 11px; }
-.workspace-meta small,
-.builder-stat-grid small,
-.drawer-metrics small {
-  display: block;
-  color: var(--text-muted);
-  font-size: 9px;
-  font-weight: 760;
-  letter-spacing: .06em;
-  text-transform: uppercase;
-}
-.workspace-meta strong {
-  display: block;
-  margin-top: 3px;
-  color: var(--text-secondary);
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
-}
-.source-alert {
-  grid-column: 1 / -1;
-  display: flex;
-  gap: 11px;
-  align-items: center;
-  border: 1px solid var(--border);
-  border-radius: 11px;
-  padding: 10px 12px;
-  background: rgba(0, 0, 0, .13);
-}
-.source-alert.ready { border-color: rgba(0, 230, 118, .24); }
-.source-alert.blocked { border-color: rgba(255, 179, 0, .35); }
-.source-alert-icon {
-  display: grid;
-  place-items: center;
-  flex: 0 0 27px;
-  height: 27px;
-  border-radius: 50%;
-  background: rgba(0, 230, 118, .12);
-  color: var(--accent);
-  font-weight: 900;
-}
-.source-alert.blocked .source-alert-icon {
-  background: rgba(255, 179, 0, .12);
-  color: var(--amber);
-}
-.source-alert strong { font-size: 12px; }
-.source-alert p {
-  margin-top: 2px;
-  color: var(--text-muted);
-  font-size: 10px;
-}
-.builder-stat-grid {
-  grid-column: 1 / -1;
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 8px;
-}
-.builder-stat-grid span { padding: 12px; }
-.builder-stat-grid strong {
-  display: block;
-  margin-top: 5px;
-  color: var(--text-primary);
-  font-size: 22px;
-  font-variant-numeric: tabular-nums;
-  letter-spacing: -.035em;
-}
-.product-shell .panel {
-  padding: 17px;
-  overflow: hidden;
-}
-.product-shell .section-head {
-  align-items: center;
-  margin-bottom: 14px;
-  padding-bottom: 13px;
-  border-color: var(--border);
-}
-.product-shell .section-head > div { display: grid; gap: 4px; }
-.product-shell .section-head h2 {
-  font-size: 18px;
-  letter-spacing: -.018em;
-}
-.product-shell .section-head p {
-  color: var(--text-muted);
-  font-size: 10px;
-}
-.product-shell .slip-map {
-  grid-template-columns: 190px minmax(0, 1fr);
-  gap: 10px;
-}
-.product-shell .slip-summary,
-.product-shell .map-card,
-.product-shell .update-line {
-  background: rgba(6, 13, 16, .78) !important;
-}
-.product-shell .slip-summary {
-  border-color: rgba(0, 230, 118, .2) !important;
-}
-.product-shell .slip-summary strong { color: var(--accent); }
-.product-shell .map-cards { gap: 8px; }
-.product-shell .map-card {
-  min-height: 114px;
-  border-color: var(--border) !important;
-  padding: 13px;
-}
-.product-shell .map-card-head strong { color: var(--accent); }
-.product-shell .map-count strong { font-size: 29px; }
-.market-browser-list {
-  display: grid;
-  gap: 8px;
-}
-.market-browser-row {
-  display: grid;
-  grid-template-columns: minmax(260px, 1fr) repeat(3, minmax(72px, .32fr)) auto;
-  gap: 12px;
-  align-items: center;
-  border: 1px solid var(--border);
-  border-radius: 11px;
-  padding: 12px;
-  background: rgba(5, 12, 15, .72);
-  transition: border-color .16s ease, background .16s ease;
-}
-.market-browser-row:hover {
-  border-color: rgba(0, 230, 118, .28);
-  background: rgba(8, 17, 20, .95);
-}
-.market-browser-heading {
-  display: flex;
-  gap: 10px;
-  min-width: 0;
-  align-items: center;
-}
-.contract-orb {
-  flex: 0 0 28px;
-  width: 28px;
-  height: 28px;
-  border: 1px solid rgba(0, 230, 118, .38);
-  border-radius: 50%;
-  background: radial-gradient(circle, rgba(0, 230, 118, .45) 0 16%, rgba(0, 230, 118, .08) 18% 100%);
-  box-shadow: inset 0 0 12px rgba(0, 230, 118, .08);
-}
-.market-browser-heading div { min-width: 0; }
-.market-browser-heading strong {
-  display: block;
-  overflow: hidden;
-  color: var(--text-primary);
-  font-size: 12px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.market-browser-heading small {
-  display: block;
-  margin-top: 3px;
-  overflow: hidden;
-  color: var(--text-muted);
-  font-size: 9px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.market-quote-cell { text-align: right; }
-.market-quote-cell small {
-  display: block;
-  color: var(--text-muted);
-  font-size: 8px;
-  font-weight: 760;
-  text-transform: uppercase;
-}
-.market-quote-cell strong {
-  color: var(--text-secondary);
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
-}
-.market-browser-details {
-  grid-column: 1 / -1;
-  border-top: 1px solid var(--border);
-  padding-top: 8px;
-}
-.market-browser-details summary {
-  width: max-content;
-  color: var(--accent);
-  font-size: 10px;
-  font-weight: 700;
-  cursor: pointer;
-}
-.market-browser-details ul {
-  display: grid;
-  gap: 5px;
-  margin: 9px 0 0;
-  padding: 0;
-  list-style: none;
-}
-.market-browser-details li {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  border-radius: 7px;
-  padding: 8px 9px;
-  background: var(--surface-muted);
-}
-.market-browser-details li span { min-width: 0; }
-.market-browser-details li strong,
-.market-browser-details li small { display: block; }
-.market-browser-details li strong {
-  overflow: hidden;
-  color: var(--text-secondary);
-  font-size: 10px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.market-browser-details li small {
-  margin-top: 2px;
-  color: var(--text-muted);
-  font-size: 9px;
-}
-.market-browser-details li b {
-  color: var(--accent);
-  font-size: 11px;
-}
-.market-browser-details > p {
-  margin-top: 8px;
-  color: var(--text-muted);
-  font-size: 9px;
-}
-.sports-board-list {
-  display: grid;
-  gap: 8px;
-}
-.sports-event {
-  display: grid;
-  gap: 10px;
-  border: 1px solid var(--border);
-  border-radius: 11px;
-  padding: 12px;
-  background: rgba(5, 12, 15, .72);
-  transition: border-color .16s ease, background .16s ease;
-}
-.sports-event:hover {
-  border-color: rgba(0, 230, 118, .28);
-  background: rgba(8, 17, 20, .95);
-}
-.sports-event-heading {
-  display: flex;
-  gap: 10px;
-  min-width: 0;
-  align-items: center;
-}
-.sports-event-heading div { min-width: 0; }
-.sports-event-heading strong {
-  display: block;
-  overflow: hidden;
-  color: var(--text-primary);
-  font-size: 12px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.sports-event-heading small {
-  display: block;
-  margin-top: 3px;
-  color: var(--text-muted);
-  font-size: 9px;
-}
-.sports-market-list {
-  display: grid;
-  gap: 7px;
-}
-.sports-market {
-  border-radius: 8px;
-  padding: 8px 9px;
-  background: var(--surface-muted);
-}
-.sports-market-head {
-  display: flex;
-  gap: 10px;
-  justify-content: space-between;
-  align-items: baseline;
-}
-.sports-market-head strong {
-  color: var(--text-secondary);
-  font-size: 10px;
-}
-.sports-market-head small {
-  color: var(--text-muted);
-  font-size: 8px;
-  font-weight: 760;
-  text-transform: uppercase;
-}
-.sports-selection-list {
-  display: grid;
-  gap: 4px;
-  margin-top: 7px;
-}
-.sports-selection {
-  display: grid;
-  grid-template-columns: minmax(90px, 1fr) minmax(52px, auto) minmax(62px, auto) minmax(62px, auto) auto;
-  gap: 9px;
-  align-items: center;
-}
-.sports-selection-name {
-  overflow: hidden;
-  color: var(--text-secondary);
-  font-size: 10px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.sports-selection-odds {
-  color: var(--text-primary);
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
-  font-weight: 760;
-  text-align: right;
-}
-.sports-selection-book {
-  color: var(--text-muted);
-  font-size: 9px;
-  text-align: right;
-}
-.sports-selection-fair { text-align: right; }
-.sports-selection-fair small {
-  display: block;
-  color: var(--text-muted);
-  font-size: 8px;
-  font-weight: 760;
-  text-transform: uppercase;
-}
-.sports-selection-fair b {
-  color: var(--text-secondary);
-  font-size: 10px;
-  font-variant-numeric: tabular-nums;
-}
-.sports-shop-pill { justify-self: end; }
-.sports-state-reason {
-  color: var(--text-muted);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 9px;
-}
-@media (max-width: 640px) {
-  .sports-selection {
-    grid-template-columns: minmax(0, 1fr) auto auto;
-  }
-  .sports-selection-book { display: none; }
-}
-
-.product-empty-state,
-.drawer-empty-state {
-  display: grid;
-  place-items: center;
-  gap: 7px;
-  min-height: 190px;
-  border: 1px dashed var(--border-strong);
-  border-radius: 12px;
-  padding: 22px;
-  background: rgba(5, 12, 15, .52);
-  text-align: center;
-}
-.product-empty-state .empty-state-icon {
-  display: grid;
-  place-items: center;
-  width: 46px;
-  height: 46px;
-  border-radius: 50%;
-  background: rgba(0, 230, 118, .09);
-  color: var(--accent);
-  font-size: 25px;
-}
-.product-empty-state strong,
-.drawer-empty-state strong { font-size: 14px; }
-.product-empty-state p,
-.drawer-empty-state p,
-.drawer-empty-state small {
-  max-width: 560px;
-  color: var(--text-muted);
-  font-size: 10px;
-  line-height: 1.55;
-}
-.prediction-drawer {
-  display: grid;
-  gap: 13px;
-  padding: 15px;
-}
-.drawer-header {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  align-items: center;
-  padding-bottom: 12px;
-  border-bottom: 1px solid var(--border);
-}
-.drawer-header > div { display: grid; gap: 3px; }
-.drawer-header h2 {
-  font-size: 18px;
-  letter-spacing: -.025em;
-}
-.drawer-header > a {
-  display: grid;
-  place-items: center;
-  width: 34px;
-  height: 34px;
-  border: 1px solid var(--border);
-  border-radius: 9px;
-  color: var(--text-secondary);
-  text-decoration: none;
-}
-.drawer-slip-state {
-  display: grid;
-  grid-template-columns: auto 1fr;
-  gap: 6px 9px;
-  align-items: center;
-}
-.drawer-slip-state .pill { grid-row: 1 / span 2; }
-.drawer-slip-state strong { font-size: 12px; }
-.drawer-slip-state small { color: var(--text-muted); font-size: 9px; }
-.drawer-alert {
-  display: flex;
-  gap: 9px;
-  border: 1px solid rgba(255, 179, 0, .3);
-  border-radius: 10px;
-  padding: 10px;
-  background: rgba(255, 179, 0, .055);
-}
-.drawer-alert > span { color: var(--amber); font-size: 17px; }
-.drawer-alert p {
-  color: #c3b791;
-  font-size: 9px;
-  line-height: 1.5;
-}
-.drawer-metrics {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 7px;
-}
-.drawer-metrics span { padding: 9px; }
-.drawer-metrics strong {
-  display: block;
-  margin-top: 4px;
-  color: var(--text-primary);
-  font-size: 14px;
-  font-variant-numeric: tabular-nums;
-}
-.drawer-leg-list {
-  display: grid;
-  gap: 4px;
-  max-height: 390px;
-  margin: 0;
-  padding: 0;
-  overflow: auto;
-  list-style: none;
-}
-.drawer-leg-list li {
-  display: grid;
-  grid-template-columns: 8px minmax(0, 1fr) auto;
-  gap: 8px;
-  align-items: start;
-  border-bottom: 1px solid rgba(29, 42, 48, .72);
-  padding: 8px 3px;
-}
-.leg-status-dot {
-  width: 7px;
-  height: 7px;
-  margin-top: 5px;
-  border-radius: 50%;
-  background: var(--accent);
-  box-shadow: 0 0 8px rgba(0, 230, 118, .45);
-}
-.drawer-leg-list strong,
-.drawer-leg-list small,
-.drawer-leg-list time { display: block; }
-.drawer-leg-list strong {
-  overflow: hidden;
-  color: var(--text-secondary);
-  font-size: 10px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.drawer-leg-list small,
-.drawer-leg-list time {
-  margin-top: 2px;
-  color: var(--text-muted);
-  font-size: 8px;
-}
-.drawer-leg-list b {
-  color: var(--accent);
-  font-size: 10px;
-  font-variant-numeric: tabular-nums;
-}
-.drawer-more {
-  color: var(--text-muted);
-  font-size: 9px;
-  text-align: center;
-}
-.prediction-drawer button.copy.drawer-primary-action {
-  width: 100%;
-  min-height: 45px;
-  border: 0 !important;
-  border-radius: 10px !important;
-  background: linear-gradient(100deg, var(--accent-deep), #42eca0) !important;
-  color: #03120a !important;
-}
-.drawer-action-row {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 7px;
-}
-.drawer-action-row a,
-.drawer-secondary-action {
-  display: grid;
-  place-items: center;
-  min-height: 38px;
-  border: 1px solid var(--border);
-  border-radius: 9px;
-  background: var(--surface-muted);
-  color: var(--text-secondary);
-  font-size: 9px;
-  font-weight: 700;
-  text-align: center;
-  text-decoration: none;
-}
-.drawer-trust-card {
-  display: flex;
-  gap: 9px;
-  border: 1px solid rgba(124, 77, 255, .23);
-  border-radius: 10px;
-  padding: 10px;
-  background: rgba(124, 77, 255, .045);
-}
-.drawer-trust-card > span {
-  display: grid;
-  place-items: center;
-  flex: 0 0 25px;
-  height: 25px;
-  border-radius: 50%;
-  background: rgba(124, 77, 255, .14);
-  color: #aa8dff;
-}
-.drawer-trust-card strong { font-size: 10px; }
-.drawer-trust-card p {
-  margin-top: 3px;
-  color: var(--text-muted);
-  font-size: 9px;
-  line-height: 1.45;
-}
-.drawer-warning {
-  display: grid;
-  place-items: center;
-  width: 43px;
-  height: 43px;
-  border-radius: 50%;
-  background: rgba(255, 179, 0, .1);
-  color: var(--amber);
-  font-size: 20px;
-  font-weight: 900;
-}
-.product-shell .decision,
-.product-shell .slip-card,
-.product-shell .league-block,
-.product-shell .card {
-  border-color: var(--border) !important;
-  background: rgba(6, 13, 16, .72) !important;
-}
-.product-shell .decision.good { border-color: rgba(0, 230, 118, .26) !important; }
-.product-shell .decision.warning { border-color: rgba(255, 179, 0, .3) !important; }
-.product-shell .metric-strip span,
-.product-shell .prob-grid span,
-.product-shell .quote-grid span {
-  border-color: var(--border);
-  background: var(--surface-muted);
-}
-.product-shell .slip-card { padding: 15px; }
-.product-shell .slip-count strong { color: var(--accent); }
-.product-shell .packet-note {
-  margin: 11px 0;
-  border-left: 2px solid var(--amber);
-  padding-left: 9px;
-  color: #a99870;
-}
-.product-shell .league-block { padding: 10px; }
-.product-shell .slip-leg {
-  border-color: var(--border);
-  border-left-color: var(--accent);
-  background: var(--surface-muted);
-}
-.product-shell .leg-metrics b { color: var(--accent); }
-.product-shell .pill.good {
-  border-color: rgba(0, 230, 118, .3);
-  background: rgba(0, 230, 118, .07);
-  color: var(--accent);
-}
-.product-shell .pill.warning {
-  border-color: rgba(255, 179, 0, .34);
-  background: rgba(255, 179, 0, .065);
-  color: var(--amber);
-}
-.sport-filter-list {
-  display: grid;
-  gap: 4px;
-}
-.sport-filter {
-  display: grid;
-  grid-template-columns: 22px minmax(0, 1fr) auto;
-  gap: 7px;
-  align-items: center;
-  width: 100%;
-  min-height: 40px;
-  border: 1px solid transparent !important;
-  border-radius: 9px !important;
-  padding: 0 9px !important;
-  background: transparent !important;
-  color: #93a39c !important;
-  font-size: 12px !important;
-  font-weight: 620 !important;
-  text-align: left;
-  cursor: pointer;
-}
-.sport-filter span { color: #84938d; font-size: 15px; }
-.sport-filter b {
-  min-width: 22px;
-  border-radius: 999px;
-  padding: 2px 6px;
-  background: var(--surface-soft);
-  color: var(--text-muted);
-  font-size: 9px;
-  text-align: center;
-}
-.sport-filter:hover,
-.sport-filter.active {
-  border-color: rgba(0, 230, 118, .2) !important;
-  background: linear-gradient(90deg, rgba(0, 230, 118, .14), rgba(0, 230, 118, .025)) !important;
-  color: var(--text-primary) !important;
-}
-.sport-filter.active span { color: var(--accent); }
-.sidebar-select {
-  display: grid;
-  gap: 5px;
-  color: var(--text-muted);
-  font-size: 9px;
-  font-weight: 750;
-  text-transform: uppercase;
-}
-.sidebar-select select {
-  width: 100%;
-  min-height: 38px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 0 9px;
-  background: var(--surface-muted);
-  color: var(--text-secondary);
-  font: inherit;
-  font-size: 11px;
-  text-transform: none;
-}
-.workspace-hero {
-  padding: 18px 19px;
-}
-.workspace-hero h1 {
-  font-size: clamp(24px, 2.3vw, 34px);
-}
-.builder-toolbar {
-  grid-column: 1 / -1;
-  display: grid;
-  grid-template-columns: minmax(220px, 1fr) auto auto;
-  gap: 9px;
-  align-items: center;
-  border-top: 1px solid var(--border);
-  padding-top: 14px;
-}
-.builder-search {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  gap: 9px;
-  align-items: center;
-  min-height: 42px;
-  border: 1px solid var(--border);
-  border-radius: 9px;
-  padding: 0 12px;
-  background: rgba(4, 10, 13, .78);
-  color: var(--text-muted);
-}
-.builder-search:focus-within { border-color: rgba(0, 230, 118, .52); }
-.builder-search input {
-  min-width: 0;
-  border: 0;
-  outline: 0;
-  background: transparent;
-  color: var(--text-primary);
-  font: inherit;
-  font-size: 12px;
-}
-.builder-search input::placeholder { color: var(--text-muted); }
-.date-tabs {
-  display: flex;
-  gap: 4px;
-  min-height: 42px;
-  border: 1px solid var(--border);
-  border-radius: 9px;
-  padding: 4px;
-  background: rgba(4, 10, 13, .78);
-}
-.date-tabs button {
-  min-height: 32px;
-  border: 0 !important;
-  border-radius: 7px !important;
-  padding: 0 11px !important;
-  background: transparent !important;
-  color: var(--text-muted) !important;
-  font-size: 10px !important;
-}
-.date-tabs button.active {
-  background: rgba(0, 230, 118, .12) !important;
-  color: var(--accent) !important;
-}
-.toolbar-live {
-  display: inline-flex;
-  gap: 7px;
-  align-items: center;
-  color: var(--text-muted);
-  font-size: 10px;
-  white-space: nowrap;
-}
-.toolbar-live i {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--accent);
-  box-shadow: 0 0 9px rgba(0, 230, 118, .65);
-}
-.builder-board-panel .sports-board-list { gap: 9px; }
-.builder-board-panel .sports-event {
-  grid-template-columns: minmax(180px, .42fr) minmax(0, 1fr);
-  align-items: start;
-  padding: 13px;
-}
-.builder-board-panel .sports-market-list {
-  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
-}
-.builder-board-panel .sports-market { min-width: 0; }
-.builder-board-panel .sports-selection {
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 7px;
-}
-.builder-board-panel .sports-selection-book,
-.builder-board-panel .sports-selection-fair,
-.builder-board-panel .sports-shop-pill { display: none; }
-.drawer-watchlist-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding-top: 2px;
-}
-.drawer-watchlist-head strong { color: var(--text-secondary); font-size: 11px; }
-.drawer-watchlist-head span { color: var(--text-muted); font-size: 9px; }
-.drawer-watchlist {
-  display: grid;
-  gap: 5px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-.drawer-watchlist li {
-  display: grid;
-  grid-template-columns: 28px minmax(0, 1fr) auto;
-  gap: 8px;
-  align-items: center;
-  border: 1px solid var(--border);
-  border-radius: 9px;
-  padding: 9px;
-  background: var(--surface-muted);
-}
-.drawer-watchlist .contract-orb { width: 25px; height: 25px; }
-.drawer-watchlist li > div { min-width: 0; }
-.drawer-watchlist li strong,
-.drawer-watchlist li small { display: block; }
-.drawer-watchlist li strong {
-  overflow: hidden;
-  color: var(--text-secondary);
-  font-size: 9px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.drawer-watchlist li small { margin-top: 3px; color: var(--text-muted); font-size: 8px; }
-.drawer-watch-state { display: grid; justify-items: end; gap: 4px; }
-.drawer-watch-state b { color: var(--accent); font-size: 10px; }
-.drawer-watch-state .pill { padding: 2px 5px; font-size: 7px; white-space: nowrap; }
-.drawer-source-context {
-  border-left: 2px solid var(--purple);
-  padding-left: 9px;
-  color: var(--text-muted);
-  font-size: 9px;
-  line-height: 1.5;
-}
-.drawer-primary-link {
-  display: flex;
-  justify-content: center;
-  gap: 8px;
-  align-items: center;
-  min-height: 43px;
-  border-radius: 9px;
-  background: linear-gradient(100deg, var(--accent-deep), #42eca0);
-  color: #03120a;
-  font-size: 10px;
-  font-weight: 800;
-  text-decoration: none;
-}
-.mobile-bottom-nav { display: none; }
-
-@media (max-width: 1450px) {
-  .app-frame { grid-template-columns: 190px minmax(510px, 1fr) 326px; }
-  .market-browser-row { grid-template-columns: minmax(230px, 1fr) repeat(3, minmax(62px, .26fr)) auto; }
-  .workspace-meta { grid-template-columns: 1fr; }
-}
-@media (max-width: 1180px) {
-  .app-topbar { grid-template-columns: auto minmax(300px, 1fr) auto; }
-  .mobile-menu-toggle { display: block; margin-right: 10px; }
-  .brand { grid-column: 2; }
-  .product-shell .top-navigation { display: none !important; }
-  .app-frame { grid-template-columns: minmax(0, 1fr) 330px; }
-  .app-sidebar {
-    position: fixed;
-    top: 76px;
-    bottom: 12px;
-    left: 12px;
-    z-index: 60;
-    width: 224px;
-    max-height: none;
-    transform: translateX(calc(-100% - 22px));
-    transition: transform .2s ease;
-  }
-  .app-sidebar.open { transform: translateX(0); }
-  .product-shell .map-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-}
-@media (max-width: 900px) {
-  .app-frame { grid-template-columns: minmax(0, 1fr); }
-  .prediction-drawer {
-    position: static;
-    grid-row: 1;
-    max-height: none;
-  }
-  .workspace { grid-row: 2; }
-  .drawer-leg-list { max-height: 300px; }
-  .workspace-hero { grid-template-columns: 1fr; }
-  .workspace-meta { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .builder-toolbar { grid-template-columns: minmax(0, 1fr) auto; }
-  .toolbar-live { display: none; }
-  .market-browser-row { grid-template-columns: minmax(220px, 1fr) repeat(3, minmax(62px, .3fr)) auto; }
-}
-@media (max-width: 680px) {
-  body.product-shell { padding-bottom: 69px; }
-  .app-topbar {
-    grid-template-columns: auto minmax(0, 1fr) auto;
-    min-height: 58px;
-    padding: 0 9px;
-  }
-  .brand { justify-self: center; font-size: 15px; }
-  .brand-mark { width: 29px; height: 29px; }
-  .research-only-badge { display: none; }
-  .refresh-control #refresh-slip {
-    min-width: 40px;
-    width: 40px;
-    min-height: 40px;
-    padding: 0;
-    font-size: 0;
-  }
-  .refresh-control #refresh-slip .refresh-icon {
-    display: inline-grid;
-    place-items: center;
-    font-size: 18px;
-  }
-  .refresh-control #refresh-slip .refresh-label { display: none; }
-  .refresh-control #refresh-status { display: none; }
-  .app-frame { gap: 8px; padding: 8px; }
-  .app-sidebar { top: 66px; left: 8px; bottom: 76px; }
-  .workspace-hero,
-  .product-shell .panel,
-  .prediction-drawer {
-    border-radius: 12px !important;
-    box-shadow: none !important;
-  }
-  .workspace-hero { padding: 16px; }
-  .workspace-hero h1 { font-size: 28px; }
-  .workspace-meta { grid-template-columns: 1fr 1fr; }
-  .builder-stat-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .builder-toolbar { grid-template-columns: 1fr; }
-  .date-tabs { overflow-x: auto; }
-  .product-shell .panel { padding: 13px; }
-  .product-shell .section-head {
-    display: grid;
-    gap: 5px;
-    align-items: start;
-  }
-  .product-shell .section-head p { text-align: left; }
-  .product-shell .slip-map { grid-template-columns: 1fr; }
-  .product-shell .map-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .product-shell .map-card { min-height: 105px; }
-  .market-browser-row {
-    grid-template-columns: minmax(0, 1fr) auto;
-    gap: 8px;
-  }
-  .market-browser-heading { grid-column: 1 / -1; }
-  .market-quote-cell { text-align: left; }
-  .market-browser-row > .market-quote-cell:nth-of-type(3) { display: none; }
-  .market-browser-row > .pill { justify-self: end; }
-  .builder-board-panel .sports-event { grid-template-columns: 1fr; }
-  .builder-board-panel .sports-market-list { grid-template-columns: 1fr; }
-  .prediction-drawer { padding: 13px; }
-  .drawer-metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  .drawer-metrics span { padding: 8px; }
-  .drawer-metrics strong { font-size: 12px; }
-  .product-shell .slip-topline { grid-template-columns: 1fr; }
-  .product-shell .packet-actions { grid-template-columns: 1fr 1fr; min-width: 0; }
-  .product-shell .slip-groups { grid-template-columns: 1fr; }
-  .product-shell .metric-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .mobile-bottom-nav {
-    position: fixed;
-    right: 0;
-    bottom: 0;
-    left: 0;
-    z-index: 70;
-    display: grid;
-    grid-template-columns: repeat(5, 1fr);
-    min-height: 62px;
-    border-top: 1px solid var(--border);
-    padding: 6px max(7px, env(safe-area-inset-right)) max(6px, env(safe-area-inset-bottom)) max(7px, env(safe-area-inset-left));
-    background: rgba(5, 9, 12, .97);
-    backdrop-filter: blur(18px);
-  }
-  .mobile-bottom-nav a {
-    display: grid;
-    place-items: center;
-    gap: 1px;
-    color: var(--text-muted);
-    font-size: 8px;
-    font-weight: 690;
-    text-decoration: none;
-  }
-  .mobile-bottom-nav a span { color: var(--text-secondary); font-size: 17px; }
-  .mobile-bottom-nav a:first-child,
-  .mobile-bottom-nav a:first-child span { color: var(--accent); }
-}
-@media (max-width: 410px) {
-  .brand span { font-size: 14px; }
-  .brand-mark { width: 26px; height: 26px; }
-  .workspace-hero h1 { font-size: 25px; }
-  .workspace-meta,
-  .builder-stat-grid,
-  .product-shell .map-cards,
-  .drawer-action-row { grid-template-columns: 1fr; }
-  .drawer-metrics { grid-template-columns: 1fr 1fr 1fr; }
-  .product-shell .packet-actions { grid-template-columns: 1fr; }
-}
-"""
-
-
-JS = r"""
-const legs = document.querySelector("#legs");
-const target = document.querySelector("#target");
-const penalty = document.querySelector("#penalty");
-const combined = document.querySelector("#combined");
-const adjusted = document.querySelector("#adjusted");
-const statusText = document.querySelector("#status");
-const refreshButton = document.querySelector("#refresh-slip");
-const refreshStatus = document.querySelector("#refresh-status");
-let refreshPollTimer = null;
-let liveDataPollTimer = null;
-const liveDataGeneratedAt = window.PAPER_DATA?.generated_at || "";
-function researchActionHeaders() {
-  const csrfToken = sessionStorage.getItem("research_csrf_token") || "";
-  const headers = { "X-Research-Action": "refresh-dashboard" };
-  if (csrfToken) headers["X-CSRF-Token"] = csrfToken;
-  return headers;
-}
-const LIVE_DATA_POLL_SECONDS = 60;
-const LIVE_DATA_STALE_SECONDS = 300;
-
-function formatTimestamp(value) {
-  if (!value) return "";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
-}
-
-function formatEventTime(value) {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "Time TBD";
-  const now = new Date();
-  const dateKey = new Date(date.getFullYear(), date.getMonth(), date.getDate());
-  const todayKey = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const dayDelta = Math.round((dateKey - todayKey) / 86400000);
-  const dayText = dayDelta === 0
-    ? "Today"
-    : dayDelta === 1
-      ? "Tomorrow"
-      : date.toLocaleDateString([], { month: "short", day: "numeric" });
-  const timeText = date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-  return `${dayText} · ${timeText}`;
-}
-
-document.querySelectorAll("time[datetime]").forEach(element => {
-  element.textContent = formatEventTime(element.dateTime);
-});
-
-function setRefreshStatus(status) {
-  if (!refreshStatus || !refreshButton) return;
-  const state = status?.state || "idle";
-  const refreshLabel = refreshButton.querySelector(".refresh-label");
-  refreshStatus.className = "";
-  if (state === "running") {
-    refreshButton.disabled = true;
-    if (refreshLabel) refreshLabel.textContent = "Refreshing…";
-    refreshStatus.classList.add("warning");
-    refreshStatus.textContent = "Updating";
-    return;
-  }
-  refreshButton.disabled = false;
-  if (refreshLabel) refreshLabel.textContent = "Refresh";
-  if (state === "complete") {
-    refreshStatus.classList.add("good");
-    refreshStatus.textContent = `Live · ${formatTimestamp(status.generated_at)}`;
-    return;
-  }
-  if (state === "error") {
-    refreshStatus.classList.add("bad");
-    refreshStatus.textContent = status.error || status.message || "Refresh failed.";
-    return;
-  }
-  refreshStatus.textContent = "Ready";
-}
-
-async function fetchRefreshStatus() {
-  const response = await fetch("/refresh-status", { cache: "no-store" });
-  return response.json();
-}
-
-async function pollRefreshStatus() {
-  try {
-    const status = await fetchRefreshStatus();
-    setRefreshStatus(status);
-    if (status.state === "running") {
-      refreshPollTimer = setTimeout(pollRefreshStatus, 2000);
-      return;
-    }
-    if (status.state === "complete") {
-      setTimeout(() => window.location.reload(), 900);
-    }
-  } catch (error) {
-    setRefreshStatus({ state: "error", error: `Refresh status check failed: ${error.message}` });
-  }
-}
-
-async function triggerSlipRefresh() {
-  if (!refreshButton) return;
-  clearTimeout(refreshPollTimer);
-  setRefreshStatus({ state: "running" });
-  try {
-    const response = await fetch("/refresh", {
-      method: "POST",
-      cache: "no-store",
-      headers: researchActionHeaders(),
-    });
-    const status = await response.json();
-    setRefreshStatus(status);
-    if (status.state === "running") {
-      refreshPollTimer = setTimeout(pollRefreshStatus, 2000);
-    }
-    if (!response.ok && status.state !== "running") {
-      setRefreshStatus({ state: "error", error: status.message || "Refresh request was rejected." });
-    }
-  } catch (error) {
-    setRefreshStatus({ state: "error", error: `Refresh request failed: ${error.message}` });
-  }
-}
-
-async function pollLiveDataFreshness() {
-  try {
-    const response = await fetch("/quality.json", { cache: "no-store" });
-    const quality = await response.json();
-    if (quality.generated_at && liveDataGeneratedAt && quality.generated_at !== liveDataGeneratedAt) {
-      window.location.reload();
-      return;
-    }
-    if (Number(quality.data_age_seconds || 0) > LIVE_DATA_STALE_SECONDS) {
-      const status = await fetchRefreshStatus().catch(() => ({}));
-      if (status.state !== "running") {
-        const refreshResponse = await fetch("/refresh", {
-          method: "POST",
-          cache: "no-store",
-          headers: researchActionHeaders(),
-        });
-        const refreshPayload = await refreshResponse.json().catch(() => ({}));
-        setRefreshStatus(refreshPayload);
-        if (refreshPayload.state === "running") {
-          refreshPollTimer = setTimeout(pollRefreshStatus, 2000);
-        }
-      }
-    }
-  } catch (error) {
-    setRefreshStatus({ state: "error", error: `Live freshness check failed: ${error.message}` });
-  } finally {
-    liveDataPollTimer = setTimeout(pollLiveDataFreshness, LIVE_DATA_POLL_SECONDS * 1000);
-  }
-}
-
-function addLeg(label = "", probability = "") {
-  const row = document.createElement("div");
-  row.className = "leg-row";
-  row.innerHTML = `
-    <label>Leg label<input class="label" value="${label}" placeholder="MLB over 8.5 runs"></label>
-    <label>Probability %<input class="prob" type="number" min="1" max="99.9" step="0.1" value="${probability}"></label>
-    <label>Entry cents<input class="price" type="number" min="0" max="100" step="0.1"></label>
-    <button type="button" class="remove">x</button>
-  `;
-  row.querySelector(".remove").addEventListener("click", () => {
-    row.remove();
-    recalc();
-  });
-  row.querySelectorAll("input").forEach(input => input.addEventListener("input", recalc));
-  legs.appendChild(row);
-  recalc();
-}
-
-function recalc() {
-  if (!legs || !target || !penalty || !combined || !adjusted || !statusText) {
-    return;
-  }
-  const probs = [...document.querySelectorAll(".prob")]
-    .map(input => Number(input.value) / 100)
-    .filter(value => value > 0 && value <= 1);
-  if (!probs.length) {
-    combined.textContent = "0.00%";
-    adjusted.textContent = "0.00%";
-    statusText.textContent = "Add legs";
-    return;
-  }
-  const raw = probs.reduce((acc, value) => acc * value, 1);
-  const adj = raw * (1 - Number(penalty.value || 0) / 100);
-  const targetValue = Number(target.value || 80) / 100;
-  combined.textContent = `${(raw * 100).toFixed(2)}%`;
-  adjusted.textContent = `${(adj * 100).toFixed(2)}%`;
-  statusText.textContent = adj >= targetValue ? "Meets target" : "Below target";
-  statusText.style.color = adj >= targetValue ? "var(--accent)" : "var(--bad)";
-}
-
-const addLegButton = document.querySelector("#add-leg");
-const clearLegsButton = document.querySelector("#clear-legs");
-if (addLegButton) addLegButton.addEventListener("click", () => addLeg());
-if (clearLegsButton && legs) {
-  clearLegsButton.addEventListener("click", () => {
-    legs.innerHTML = "";
-    recalc();
-  });
-}
-document.querySelectorAll(".copy").forEach(button => {
-  const originalText = button.textContent;
-  button.addEventListener("click", async () => {
-    const text = button.dataset.copy || button.dataset.title || "";
-    await navigator.clipboard.writeText(text);
-    button.textContent = "Copied";
-    setTimeout(() => button.textContent = originalText, 900);
-  });
-});
-const sectionLinks = [...document.querySelectorAll('.quick-nav a[href^="#"], .mobile-bottom-nav a[href^="#"], .side-navigation a[href^="#"]')];
-const linkedSections = [...new Set(sectionLinks
-  .map(link => document.querySelector(link.getAttribute("href")))
-  .filter(Boolean))];
-function setCurrentSection(sectionId) {
-  sectionLinks.forEach(link => {
-    if (link.getAttribute("href") === `#${sectionId}`) {
-      link.setAttribute("aria-current", "location");
-    } else {
-      link.removeAttribute("aria-current");
-    }
-  });
-}
-if (sectionLinks.length) {
-  const initialSectionId = window.location.hash.slice(1) || linkedSections[0]?.id;
-  if (initialSectionId) setCurrentSection(initialSectionId);
-  sectionLinks.forEach(link => link.addEventListener("click", () => {
-    setCurrentSection(link.getAttribute("href").slice(1));
-  }));
-}
-if ("IntersectionObserver" in window && linkedSections.length) {
-  const sectionObserver = new IntersectionObserver(entries => {
-    const visibleSection = entries
-      .filter(entry => entry.isIntersecting)
-      .sort((left, right) => right.intersectionRatio - left.intersectionRatio)[0];
-    if (visibleSection) setCurrentSection(visibleSection.target.id);
-  }, { rootMargin: "-20% 0px -65% 0px", threshold: [0.01, 0.25, 0.6] });
-  linkedSections.forEach(section => sectionObserver.observe(section));
-}
-if (target) target.addEventListener("input", recalc);
-if (penalty) penalty.addEventListener("input", recalc);
-if (refreshButton) {
-  refreshButton.addEventListener("click", triggerSlipRefresh);
-  fetchRefreshStatus().then(status => {
-    setRefreshStatus(status);
-    if (status.state === "running") {
-      refreshPollTimer = setTimeout(pollRefreshStatus, 2000);
-    }
-  }).catch(() => {});
-}
-const mobileMenuToggle = document.querySelector("#mobile-menu-toggle");
-const appSidebar = document.querySelector("#app-sidebar");
-function setMobileMenu(open) {
-  if (!mobileMenuToggle || !appSidebar) return;
-  appSidebar.classList.toggle("open", open);
-  mobileMenuToggle.setAttribute("aria-expanded", String(open));
-}
-if (mobileMenuToggle && appSidebar) {
-  mobileMenuToggle.addEventListener("click", () => {
-    setMobileMenu(!appSidebar.classList.contains("open"));
-  });
-  appSidebar.querySelectorAll('a[href^="#"]').forEach(link => {
-    link.addEventListener("click", () => setMobileMenu(false));
-  });
-  document.addEventListener("keydown", event => {
-    if (event.key === "Escape") setMobileMenu(false);
-  });
-}
-const sportFilters = [...document.querySelectorAll(".sport-filter")];
-const marketSearch = document.querySelector("#market-search");
-let activeLeague = "all";
-function applyMarketFilters() {
-  const query = (marketSearch?.value || "").trim().toLowerCase();
-  document.querySelectorAll(".sports-event").forEach(event => {
-    const leagueMatch = activeLeague === "all" || event.dataset.league === activeLeague;
-    const searchMatch = !query || (event.dataset.search || "").includes(query);
-    event.hidden = !(leagueMatch && searchMatch);
-  });
-  document.querySelectorAll(".market-browser-row").forEach(row => {
-    row.hidden = Boolean(query) && !(row.dataset.search || "").includes(query);
-  });
-}
-sportFilters.forEach(button => {
-  button.addEventListener("click", () => {
-    activeLeague = button.dataset.league || "all";
-    sportFilters.forEach(item => item.classList.toggle("active", item === button));
-    applyMarketFilters();
-    if (window.innerWidth <= 1180) setMobileMenu(false);
-  });
-});
-if (marketSearch) marketSearch.addEventListener("input", applyMarketFilters);
-document.querySelectorAll(".date-tabs button").forEach(button => {
-  button.addEventListener("click", () => {
-    document.querySelectorAll(".date-tabs button").forEach(item => item.classList.toggle("active", item === button));
-  });
-});
-liveDataPollTimer = setTimeout(pollLiveDataFreshness, LIVE_DATA_POLL_SECONDS * 1000);
-recalc();
-"""

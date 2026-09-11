@@ -380,8 +380,11 @@ class SlipArithmeticPrecisionTests(unittest.TestCase):
         much as the estimate. Quoting it finer would invent precision."""
 
         markup = render_slip_analysis(analysis(hit=0.272219, interval=[0.26836, 0.27608]))
-        self.assertIn("+4.9%", markup)
-        self.assertNotIn("+4.92%", markup)
+        self.assertIn("+4.9 pts", markup)
+        # Asserted without the unit so this keeps guarding the precision if the
+        # wording changes again. It is percentage points rather than percent
+        # because it is 27.2 minus 22.3, not a fraction of either.
+        self.assertNotIn("+4.92", markup)
 
     def test_the_exact_break_even_keeps_its_decimals(self) -> None:
         """It is arithmetic on quoted prices, not a simulation."""

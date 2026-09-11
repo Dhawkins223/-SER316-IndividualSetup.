@@ -140,6 +140,54 @@ async function triggerSlipRefresh() {
   }
 }
 
+// Whether the reader is looking at data the server has withheld slips over.
+//
+// The gate has already decided this, and re-deriving it here got it wrong. The
+// poller used to ask `Number(freshness.data_age_seconds || 0) <= LIVE_DATA_
+// STALE_SECONDS`, which reads an absent age as an age of zero. Five of the six
+// outcomes `slip_payload_gate` produces block, and four of those five carry no
+// age that comparison can use:
+//
+//   blocked_refresh_failed         null     the latest refresh failed
+//   blocked_stale_source           null     serving cached rows
+//   blocked_missing_generated_at   null     timestamp missing or unparseable
+//   blocked_invalid_generated_at   -7200    timestamp in the future
+//   blocked_stale_payload          10800    ordinary stale -- the only one that worked
+//   fresh_data_ready               240      not blocked
+//
+// So in every case but ordinary staleness the reader was left on a page that
+// looks live, which is the outcome the branch below exists to prevent.
+// `status` sits in the same payload, already decided by `slip_payload_gate`.
+//
+// A response carrying neither a status nor a usable age is treated as blocked,
+// not as fine. Silence about freshness is not evidence of freshness, and the
+// first version of this function said otherwise -- which was the original
+// defect surviving in the fallback.
+function liveDataIsBlocked(freshness) {
+  if (freshness && freshness.status) return freshness.status !== "ready";
+  // One rule: an age is usable only if it is a real, finite, non-negative
+  // number of seconds. Anything else is unknown, and unknown is blocked.
+  //
+  // Each earlier version delegated part of that judgement to `Number()`, which
+  // answers with a finite number for things that are not numbers, so each one
+  // let a different set through. Written as `Number.isFinite(Number(raw))` the
+  // survivors were `""`, `"   "`, `true`, `[]` and any negative age; `null` was
+  // not among them -- that version rejected it separately, and the version
+  // before *that* is where `Number(null)` being 0 read as an age of zero.
+  //
+  // The shapes are enumerated in `tests/test_live_freshness_client.py`, which
+  // runs this function rather than describing it. Kept there rather than
+  // listed here, because a comment cannot be wrong in a way the suite notices.
+  //
+  // Negative is rejected rather than clamped: an age below zero means the
+  // payload is stamped in the future, which is `blocked_invalid_generated_at`,
+  // not freshness. `-7200 > 300` is false, so it read as live.
+  const raw = freshness ? freshness.data_age_seconds : null;
+  const age = typeof raw === "string" && raw.trim() !== "" ? Number(raw) : raw;
+  if (typeof age !== "number" || !Number.isFinite(age) || age < 0) return true;
+  return age > LIVE_DATA_STALE_SECONDS;
+}
+
 async function pollLiveDataFreshness() {
   try {
     const response = await fetch("/freshness.json", { cache: "no-store" });
@@ -149,11 +197,11 @@ async function pollLiveDataFreshness() {
       window.location.reload();
       return;
     }
-    if (Number(freshness.data_age_seconds || 0) <= LIVE_DATA_STALE_SECONDS) return;
+    if (!liveDataIsBlocked(freshness)) return;
     if (!canRefresh) {
       // A reader without refresh rights would otherwise sit on stale data
       // that still looks live, so say so instead of polling silently.
-      setRefreshStatus({ state: "error", error: "Data is stale. Ask an admin to refresh." });
+      setRefreshStatus({ state: "error", error: freshness.message || "Data is stale. Ask an admin to refresh." });
       return;
     }
     const status = await fetchRefreshStatus().catch(() => ({}));
@@ -342,6 +390,7 @@ function setMobileMenu(open) {
   if (!mobileMenuToggle || !appSidebar) return;
   appSidebar.classList.toggle("open", open);
   sidebarScrim?.classList.toggle("open", open);
+  if (sidebarScrim) sidebarScrim.hidden = !open;
   mobileMenuToggle.setAttribute("aria-expanded", String(open));
   // Without the scroll lock the page behind kept scrolling under the drawer,
   // which read as the content bleeding through it.
@@ -388,6 +437,104 @@ if (mobileMenuToggle && appSidebar) {
   window.matchMedia("(min-width: 1181px)").addEventListener("change", event => {
     if (event.matches) setMobileMenu(false);
   });
+}
+
+/* --------------------------------------------------- mobile current slip */
+
+const predictionDrawer = document.querySelector("#prediction-drawer");
+const predictionDrawerTitle = document.querySelector("#prediction-drawer-title");
+const mobileSlipToggle = document.querySelector("#mobile-slip-toggle");
+const closePredictionDrawer = document.querySelector("#close-prediction-drawer");
+const mobileSlipMedia = window.matchMedia("(max-width: 900px)");
+const slipBackground = [...document.querySelectorAll(
+  ".app-topbar, .app-sidebar, .workspace, .mobile-bottom-nav, #mobile-slip-toggle, .skip-link"
+)];
+let lastFocusedBeforeSlip = null;
+
+function setMobileSlip(open, restoreFocus = true) {
+  if (!predictionDrawer || !mobileSlipToggle) return;
+  const mobile = mobileSlipMedia.matches;
+  const expanded = mobile && open;
+  if (expanded && !document.body.classList.contains("slip-open")) {
+    setMobileMenu(false);
+    lastFocusedBeforeSlip = document.activeElement;
+  }
+  document.body.classList.toggle("slip-open", expanded);
+  predictionDrawer.hidden = mobile && !expanded;
+  mobileSlipToggle.setAttribute("aria-expanded", String(expanded));
+  predictionDrawer.toggleAttribute("aria-modal", expanded);
+  if (expanded) {
+    predictionDrawer.setAttribute("aria-modal", "true");
+    predictionDrawer.setAttribute("role", "dialog");
+  } else {
+    predictionDrawer.removeAttribute("role");
+  }
+  slipBackground.forEach(node => { node.inert = expanded; });
+  if (expanded) {
+    predictionDrawerTitle?.focus();
+  } else if (restoreFocus && lastFocusedBeforeSlip instanceof HTMLElement) {
+    const target = mobile ? lastFocusedBeforeSlip : predictionDrawerTitle;
+    target?.focus();
+    lastFocusedBeforeSlip = null;
+  }
+}
+
+if (predictionDrawer && mobileSlipToggle && closePredictionDrawer) {
+  function syncMobileSlip() {
+    const mobile = mobileSlipMedia.matches;
+    const drawerHadFocus = predictionDrawer.contains(document.activeElement);
+    document.body.classList.toggle("slip-enhanced", mobile);
+    mobileSlipToggle.hidden = !mobile;
+    closePredictionDrawer.hidden = !mobile;
+    setMobileSlip(false);
+    if (mobile && drawerHadFocus) mobileSlipToggle.focus();
+  }
+  syncMobileSlip();
+  mobileSlipMedia.addEventListener("change", syncMobileSlip);
+  mobileSlipToggle.addEventListener("click", () => setMobileSlip(true));
+  closePredictionDrawer.addEventListener("click", () => setMobileSlip(false));
+  document.querySelectorAll('a[href="#prediction-drawer"]').forEach(link => {
+    link.addEventListener("click", event => {
+      if (!mobileSlipMedia.matches) return;
+      event.preventDefault();
+      setMobileSlip(true);
+    });
+  });
+  predictionDrawer.querySelectorAll('a[href^="#"]').forEach(link => {
+    link.addEventListener("click", () => {
+      if (!mobileSlipMedia.matches) return;
+      setMobileSlip(false, false);
+      lastFocusedBeforeSlip = null;
+      const destination = document.querySelector(link.getAttribute("href"));
+      if (destination) {
+        destination.setAttribute("tabindex", "-1");
+        destination.focus();
+      }
+    });
+  });
+  document.addEventListener("keydown", event => {
+    if (!document.body.classList.contains("slip-open")) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      setMobileSlip(false);
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const focusable = [...predictionDrawer.querySelectorAll(FOCUSABLE)]
+      .filter(node => node.offsetParent !== null);
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && (document.activeElement === first || document.activeElement === predictionDrawerTitle)) {
+      event.preventDefault();
+      last?.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first?.focus();
+    }
+  });
+  if (window.location.hash === "#prediction-drawer" && mobileSlipMedia.matches) {
+    setMobileSlip(true);
+  }
 }
 
 liveDataPollTimer = setTimeout(pollLiveDataFreshness, LIVE_DATA_POLL_SECONDS * 1000);

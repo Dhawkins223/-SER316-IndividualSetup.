@@ -5,22 +5,33 @@ GitHub is the source of truth and Railway remains the hosted runtime. A Windows
 checkout, WSL, and Docker Desktop are no longer required to build, run, test, or
 prepare a deployment.
 
-Docker is still part of the project: the Codespace runs a dedicated Docker
-daemon through the official Docker-in-Docker devcontainer feature, and
-`compose.yml` uses it to provide a disposable PostgreSQL 18 development and test
-service. Docker is not used to build the Railway application; Railway continues
-to use Nixpacks.
+Docker remains part of CI and optional local validation, but the canonical
+Codespace no longer depends on a nested Docker daemon. This keeps the cloud
+workspace reliable and avoids Docker Desktop entirely. Use Railway's injected
+`DATABASE_URL` for cloud data; GitHub Actions continues to exercise the
+Compose-backed PostgreSQL tests. Docker is not used to build the Railway
+application; Railway continues to use Nixpacks.
 
 ## Architecture and data boundary
 
 ```text
-GitHub Codespace (Python 3.12 + Docker-in-Docker + tools)
+GitHub Codespace (Python 3.12 + pinned cloud tools)
   -> feature branch / pull request -> GitHub Actions
   -> reviewed Master revision -> existing Railway services
 
 Codespace Compose PostgreSQL: development and isolated tests only
 Railway PostgreSQL: staging or production only; never copied into .env
 ```
+
+Compose is the default development backend, not a requirement. Setting both
+`HAWKNETIC_DATABASE_URL` and `HAWKNETIC_TEST_DATABASE_URL` points
+`scripts/local.sh` at a managed development database — two Neon branches, or a
+PostgreSQL installed directly on the machine — and Compose is never invoked, so
+no Docker daemon is needed at all. The full suite has been run this way. Both
+URLs are required and must name different databases, and a Railway or Render host
+is refused unless `HAWKNETIC_ALLOW_HOSTED_DATABASE` is set. See
+`docs/TARGET_INFRASTRUCTURE.md` for why Neon is the right fit for a development
+database and the wrong one for this production database.
 
 The one Python web process in `paper_server.py` serves both the dashboard and
 `/api/v1`. Workers are always-on Python processes whose internal `WorkerSpec`
@@ -35,20 +46,20 @@ development database and applies the schema to that database only.
 
 1. In GitHub, open the repository, choose **Code**, **Codespaces**, then
    **Create codespace** on the feature branch you intend to use.
-2. Wait for `postCreateCommand` to finish. It installs Python dependencies,
-   pinned cloud tools, starts Compose PostgreSQL, applies migrations, and creates
-   the isolated test database.
+2. Wait for `postCreateCommand` to finish. It installs Python dependencies and
+   pinned cloud tools. Local Compose setup is optional and is skipped when Docker
+   is unavailable in the Codespace.
 3. The generated `.env` is ignored by Git and contains development placeholders.
    Replace only the optional source credentials needed for the work.
 
-The setup hook is idempotent. On later starts, `postStartCommand` health-checks
-and starts only the Codespace PostgreSQL service.
+The setup hook is idempotent. On later starts, `postStartCommand` starts local
+PostgreSQL only when a Docker daemon is available; cloud-only sessions remain
+unblocked.
 
 ## Included tools
 
-The container supplies Python 3.12, the Docker and Compose CLIs plus an isolated
-Docker daemon, GitHub CLI, PostgreSQL client tools, shellcheck, and the VS Code
-Python/Ruff/Containers/GitHub Actions extensions. The setup script installs
+The container supplies Python 3.12, PostgreSQL client tools, shellcheck, and the
+VS Code Python/Ruff/GitHub Actions extensions. The setup script installs
 checksum-pinned Bun and Railway CLI releases and a commit-pinned gstack checkout.
 No Node.js application, package manager workflow, JavaScript framework, or
 frontend build exists in this repository; Bun is installed only because gstack
@@ -213,8 +224,8 @@ restoring production without the documented restore gate.
 
 ## Migration status
 
-Completed by this repository change: repeatable devcontainer, Python 3.12
-alignment, Docker-in-Docker PostgreSQL, cloud tools, environment inventory,
+Completed by this repository change: repeatable Codespace image, Python 3.12
+alignment, cloud tools, environment inventory,
 Codespace-aware binding, and CI configuration checks. Remaining owner gates are
 repository privacy, Codespaces Secret entry, a real Codespace build/run, and the
 read-only Railway/staging/deploy-trigger review. Production service or data

@@ -312,6 +312,25 @@ class MeanIntervalTests(unittest.TestCase):
         self.assertGreater(width(100), width(1000))
 
 
+def clv_panel_report(**overrides: object) -> dict:
+    """The one report both panel-render test classes start from.
+
+    Single-sourced because they are describing the same panel: the colour tests
+    vary the interval and the sample, the absence tests vary the average, and a
+    second copy of the base row counts would let one class drift into testing a
+    panel the other never renders.
+    """
+
+    report = {
+        "graded_rows": 12, "beat_close": 7, "lost_to_close": 5, "matched_close": 0,
+        "beat_rate": "0.583333", "beat_rate_denominator": 12,
+        "average_clv": "0.0120", "average_clv_interval": ["0.0080", "0.0160"],
+        "average_clv_sample": 200, "pending_rows": 0,
+    }
+    report.update(overrides)
+    return report
+
+
 class ClvPanelColourTests(unittest.TestCase):
     """Green is this dashboard's word for a result.
 
@@ -323,12 +342,9 @@ class ClvPanelColourTests(unittest.TestCase):
     def panel(self, interval, sample: int) -> str:
         from kalshi_research_bot.paper_server import render_sports_clv_panel
 
-        return render_sports_clv_panel({
-            "graded_rows": 12, "beat_close": 7, "lost_to_close": 5, "matched_close": 0,
-            "beat_rate": "0.583333", "beat_rate_denominator": 12,
-            "average_clv": "0.0120", "average_clv_interval": interval,
-            "average_clv_sample": sample, "pending_rows": 0,
-        })
+        return render_sports_clv_panel(
+            clv_panel_report(average_clv_interval=interval, average_clv_sample=sample)
+        )
 
     def test_an_interval_clear_of_zero_is_a_result(self) -> None:
         self.assertIn('class="decision good"', self.panel(["0.0080", "0.0160"], 200))
@@ -362,14 +378,7 @@ class ClvPanelAbsenceTests(unittest.TestCase):
     def panel(self, report_overrides: dict) -> str:
         from kalshi_research_bot.paper_server import render_sports_clv_panel
 
-        report = {
-            "graded_rows": 12, "beat_close": 7, "lost_to_close": 5, "matched_close": 0,
-            "beat_rate": "0.583333", "beat_rate_denominator": 12,
-            "average_clv": "0.0120", "average_clv_interval": ["0.0080", "0.0160"],
-            "average_clv_sample": 200, "pending_rows": 0,
-        }
-        report.update(report_overrides)
-        return render_sports_clv_panel(report)
+        return render_sports_clv_panel(clv_panel_report(**report_overrides))
 
     def test_a_missing_average_is_not_a_measured_zero(self) -> None:
         for absent in (None, ""):
