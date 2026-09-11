@@ -1628,7 +1628,7 @@ def slip_estimate_display(report: dict) -> tuple[str, str]:
 
 def render_compact_slip(
     slip: dict, source_payload: dict, *, show_dollar_figures: bool = True,
-    analysis_report: dict | None = None,
+    analysis_report: dict | None = None, can_download_packets: bool = True,
 ) -> str:
     if slip.get("action") != "BUILD_SLIP":
         reason = str(slip.get("reason") or "No exact listed combo currently meets the review rules.")
@@ -1693,7 +1693,7 @@ def render_compact_slip(
     <button type="button" class="btn btn-primary copy" data-copy="{html.escape(review_text, quote=True)}">Copy Review Packet</button>
     <div class="drawer-action-row">
       <a href="#primary">Full slip details</a>
-      <a href="/review-packet.txt?slip=primary" download>Download TXT</a>
+      {'<a href="/review-packet.txt?slip=primary" download>Download TXT</a>' if can_download_packets else ''}
     </div>
     """
 
@@ -1852,6 +1852,11 @@ def render_dashboard(
     # anything unsafe to show -- so for them these panels were pure noise
     # between the tiers they came for.
     viewer_sees_operations = role_allows(viewer_role, "admin")
+    # `researcher`, matching what /review-packet.{txt,json} actually enforce.
+    # Rendering the download links to a reader gave them a control that
+    # answers `{"error": "role_forbidden"}`; the gate is read from the same
+    # rank the routes check so the two cannot drift apart again.
+    viewer_can_download_packets = role_allows(viewer_role, "researcher")
     # Money on the page -- what $5 would return, the expected value of that $5
     # -- is the one place the card borrows a bet slip's conventions. The
     # research finding is the estimate against the break-even, in probability
@@ -1943,7 +1948,7 @@ def render_dashboard(
 
       <section class="panel" id="research-edge">
         <div class="section-head"><div><span class="section-label">Operations</span><h2>Research Scout Slip</h2></div><p>Research estimates remain clearly labeled</p></div>
-        {render_slip_section(research_edge_slip, "RESEARCH SCOUT SLIP", "research_edge", payload, show_dollar_figures=viewer_sees_dollar_figures, analysis_report=analysis_reports.get("research_edge"))}
+        {render_slip_section(research_edge_slip, "RESEARCH SCOUT SLIP", "research_edge", payload, show_dollar_figures=viewer_sees_dollar_figures, analysis_report=analysis_reports.get("research_edge"), can_download_packets=viewer_can_download_packets)}
       </section>"""
         if viewer_sees_operations
         else ""
@@ -2096,17 +2101,17 @@ def render_dashboard(
 
       <section class="panel" id="primary">
         <div class="section-head"><div><span class="section-label">Primary review</span><h2>80c+ Market Tier</h2></div><p>Higher-price exact combo legs</p></div>
-        {render_slip_section(primary_slip, "80c+ MARKET TIER", "primary", payload, show_dollar_figures=viewer_sees_dollar_figures, analysis_report=analysis_reports.get("primary"))}
+        {render_slip_section(primary_slip, "80c+ MARKET TIER", "primary", payload, show_dollar_figures=viewer_sees_dollar_figures, analysis_report=analysis_reports.get("primary"), can_download_packets=viewer_can_download_packets)}
       </section>
 
       <section class="panel" id="leverage">
         <div class="section-head"><div><span class="section-label">Expanded review</span><h2>75c+ Market Tier</h2></div><p>More variance; same evidence requirements</p></div>
-        {render_slip_section(leverage_slip, "75c+ MARKET TIER", "leverage", payload, show_dollar_figures=viewer_sees_dollar_figures, analysis_report=analysis_reports.get("leverage"))}
+        {render_slip_section(leverage_slip, "75c+ MARKET TIER", "leverage", payload, show_dollar_figures=viewer_sees_dollar_figures, analysis_report=analysis_reports.get("leverage"), can_download_packets=viewer_can_download_packets)}
       </section>
 
       <section class="panel" id="all-day">
         <div class="section-head"><div><span class="section-label">All-day review</span><h2>All-Day 75-85c Tier</h2></div><p>Verified compatible contracts only</p></div>
-        {render_slip_section(all_day_slip, "ALL-DAY 75-85c TIER", "all_day", payload, show_dollar_figures=viewer_sees_dollar_figures, analysis_report=analysis_reports.get("all_day"))}
+        {render_slip_section(all_day_slip, "ALL-DAY 75-85c TIER", "all_day", payload, show_dollar_figures=viewer_sees_dollar_figures, analysis_report=analysis_reports.get("all_day"), can_download_packets=viewer_can_download_packets)}
       </section>
       {operator_panels_html}
     </main>
@@ -2117,7 +2122,7 @@ def render_dashboard(
         <a href="#primary" aria-label="Open full primary slip">↗</a>
         <button class="btn btn-tertiary btn-sm" id="close-prediction-drawer" type="button" hidden>Close slip</button>
       </div>
-      {render_compact_slip(primary_slip, payload, show_dollar_figures=viewer_sees_dollar_figures, analysis_report=analysis_reports.get("primary"))}
+      {render_compact_slip(primary_slip, payload, show_dollar_figures=viewer_sees_dollar_figures, analysis_report=analysis_reports.get("primary"), can_download_packets=viewer_can_download_packets)}
       <div class="drawer-trust-card">
         <span aria-hidden="true">✓</span>
         <div><strong>Every leg is checked</strong><p>Each one shows its Kalshi ticker, its price, and when that price was quoted.</p></div>
@@ -2146,6 +2151,7 @@ def render_slip_section(
     *,
     show_dollar_figures: bool = True,
     analysis_report: dict | None = None,
+    can_download_packets: bool = True,
 ) -> str:
     """One tier's slip card.
 
@@ -2231,8 +2237,18 @@ def render_slip_section(
             )
     review_copy_text = html.escape(review_text, quote=True)
     ticker_copy_text = html.escape(ticker_stack, quote=True)
+    # Both packet endpoints require `researcher`, so for a reader these render
+    # a control that answers `{"error": "role_forbidden"}` when clicked. The
+    # copy buttons beside them are client-side and need no endpoint, so a
+    # reader still gets the packet text -- only the download links go.
     packet_href = f"/review-packet.txt?slip={html.escape(slip_key, quote=True)}"
     packet_json_href = f"/review-packet.json?slip={html.escape(slip_key, quote=True)}"
+    packet_download_html = (
+        f'<a class="packet-download" href="{packet_href}" download>TXT</a>\n'
+        f'          <a class="packet-download" href="{packet_json_href}" download>JSON</a>'
+        if can_download_packets
+        else ""
+    )
     compatibility = slip.get("combo_compatibility") or {}
     compatibility_status = compatibility.get("status", "unknown")
     manual_entry_ready = compatibility.get("manual_entry_ready", slip.get("manual_entry_ready"))
@@ -2287,8 +2303,7 @@ def render_slip_section(
         <div class="packet-actions">
           <button type="button" class="btn btn-primary btn-sm copy" data-copy="{review_copy_text}">Copy Slip</button>
           <button type="button" class="btn btn-tertiary btn-sm copy" data-copy="{ticker_copy_text}">Copy Tickers</button>
-          <a class="packet-download" href="{packet_href}" download>TXT</a>
-          <a class="packet-download" href="{packet_json_href}" download>JSON</a>
+          {packet_download_html}
         </div>
       </div>
       <p class="packet-note">Research packet: check price, side, and start time against Kalshi before relying on any figure here.</p>

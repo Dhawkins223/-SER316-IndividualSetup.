@@ -452,6 +452,47 @@ class CustomerSurfaceTests(unittest.TestCase):
             with self.subTest(panel=panel):
                 self.assertIn(panel, found)
 
+    def test_packet_downloads_are_offered_only_to_viewers_who_may_fetch_them(self) -> None:
+        """A control that answers 403 is worse than no control.
+
+        `/review-packet.txt` and `/review-packet.json` both require
+        `researcher`, but the page rendered their links to everyone. A reader
+        clicking Download TXT got `{"error": "role_forbidden"}` -- confirmed
+        over HTTP, 403 for read_only and 200 for researcher.
+
+        The required role is read from the route authorization table rather
+        than written out here, so lowering the gate to let customers download
+        packets updates this expectation with it instead of failing.
+        """
+        import importlib.util
+
+        from kalshi_research_bot.paper_server import ROLES, role_allows
+
+        # By path, not by name: `tests/` is not a package, so a plain import
+        # works under `unittest discover` and fails under
+        # `python -m unittest tests.test_dashboard_render`.
+        spec = importlib.util.spec_from_file_location(
+            "_route_authorization", pathlib.Path(__file__).with_name("test_route_authorization.py")
+        )
+        route_authorization = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(route_authorization)
+        EXPECTED_GATES = route_authorization.EXPECTED_GATES
+
+        required = EXPECTED_GATES["/review-packet.txt"]
+        self.assertEqual(required, EXPECTED_GATES["/review-packet.json"])
+
+        for role in ROLES:
+            rendered = self.page(role)
+            links = re.findall(r'href="/review-packet[^"]*"', rendered)
+            with self.subTest(role=role):
+                if role_allows(role, required):
+                    self.assertTrue(links, f"{role} may fetch packets but is offered no download")
+                else:
+                    self.assertEqual(links, [], f"{role} is offered downloads that answer 403")
+                # The copy buttons need no endpoint, so withholding the links
+                # must not cost a reader the packet text itself.
+                self.assertIn("Copy Slip", rendered)
+
     def test_the_research_only_badge_is_never_hidden(self) -> None:
         """The one label that says this is not a betting product.
 
