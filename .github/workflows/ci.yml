@@ -36,7 +36,7 @@ jobs:
       - name: Install browser test dependencies
         run: python -m pip install -e '.[browser]'
       - name: Cache Chromium
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/ms-playwright
           key: chromium-${{ runner.os }}-${{ hashFiles('pyproject.toml') }}
