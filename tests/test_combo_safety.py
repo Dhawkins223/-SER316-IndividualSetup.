@@ -164,11 +164,13 @@ class ComboPublicQuoteStateTests(unittest.TestCase):
         # ahead of that guard and raised on the way past it.
         for field in ("yes_ask_cents", "yes_bid_cents", "no_ask_cents", "no_bid_cents"):
             for value in self.MALFORMED:
-                if value is None:
-                    # `or 0` makes None indistinguishable from an absent or
-                    # zero quote, which is the RFQ sentinel's own shape. NaN is
-                    # not in that position: it is truthy, so it survives the
-                    # `or` and fails every comparison after it.
+                if value is None and field in ("yes_ask_cents", "yes_bid_cents"):
+                    # `or 0` turns None into a zero quote, which is what the
+                    # RFQ sentinel wants on the YES side -- so only these two
+                    # are unassertable. The NO side wants 100, so a None there
+                    # reads as "unavailable" like any other bad value. NaN is
+                    # truthy, survives the `or`, and fails every comparison
+                    # after it, so it is never skipped.
                     continue
                 with self.subTest(field=field, value=type(value).__name__):
                     self.assertEqual(
