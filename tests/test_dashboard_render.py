@@ -884,6 +884,64 @@ class OperatorFacingDetailTests(unittest.TestCase):
         for page in (self.rendered, login, ops):
             self.assertNotIn("<script>", page)
 
+    def test_the_sign_in_form_cannot_submit_credentials_in_a_url(self) -> None:
+        """A form with no method is a GET, and a GET puts the password in the URL.
+
+        `login.js` intercepts submit and posts JSON, so this never fires on the
+        happy path. It does not have to: the script is deferred, so the form is
+        interactive while it is still downloading, and a submit before it runs
+        used the HTML default. Measured in Chromium with the script absent, that
+        produced
+
+            GET /login?username=...&password=...
+
+        with both filled in, putting the password in the address bar, browser
+        history, the access log and the Referer header of every request after
+        it. (The values are elided because a realistic-looking one here trips
+        the repository's secret scanner.) `method="post"` keeps
+        the credentials in the body whichever path submits the form.
+        """
+        login = render_login_page()
+        form = re.search(r"<form[^>]*id=\"login-form\"[^>]*>", login)
+        self.assertIsNotNone(form, "no sign-in form in the login page")
+        markup = form.group(0)
+        # Case-insensitive because HTML is: `method="POST"` is a perfectly good
+        # form that a case-sensitive guard would reject. The closing quote is
+        # what keeps `method="postfoo"` -- which browsers treat as GET -- from
+        # passing, so it has to stay inside the pattern.
+        self.assertRegex(
+            markup,
+            r'(?i)method="post"',
+            f"the sign-in form would submit as GET, exposing the password: {markup}",
+        )
+        # The exact endpoint, not merely "an action": pointed anywhere else the
+        # fallback stops reaching the sign-in handler, and a guard that only
+        # asks for a non-empty value would not notice.
+        self.assertRegex(
+            markup,
+            r'action="/auth/login"',
+            f"the fallback submit must reach the sign-in endpoint: {markup}",
+        )
+
+    def test_a_script_less_submit_is_explained_rather_than_returned_as_json(self) -> None:
+        """`<noscript>` cannot cover a script that fails to load.
+
+        It is suppressed whenever scripting is enabled, and a 404 on
+        `login.js` leaves scripting enabled. The form then submits natively,
+        arrives url-encoded where the handler wants JSON, and used to render
+        `{"error": "invalid_login_payload"}` on screen with nothing to say why.
+
+        The handler answers a url-encoded submit with this page instead. The
+        warning must stay off the normal render: shown by default it would
+        flash on every load while the deferred script is still fetching, which
+        trades a rare failure for a common one.
+        """
+        self.assertNotIn("did not load", render_login_page())
+        warned = render_login_page(script_required=True)
+        self.assertIn("did not load", warned)
+        self.assertIn('role="alert"', warned)
+        self.assertIn('id="login-form"', warned)
+
     def test_operator_queue_reports_a_failed_load(self) -> None:
         from kalshi_research_bot.dashboard_assets import OPS_SCRIPT
 

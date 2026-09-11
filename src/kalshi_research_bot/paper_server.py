@@ -254,7 +254,20 @@ def clear_csrf_cookie(*, secure: bool) -> str:
     return "; ".join(parts)
 
 
-def render_login_page() -> str:
+def render_login_page(*, script_required: bool = False) -> str:
+    """The sign-in page.
+
+    `script_required` re-renders it after a form-encoded submit reached the
+    sign-in endpoint, which only happens when `login.js` has not run. The
+    `<noscript>` below cannot say this: it is suppressed whenever scripting is
+    enabled, and the script failing to load leaves scripting enabled.
+    """
+    script_required_html = (
+        '<p class="login-boundary" role="alert">Sign-in needs JavaScript, and it did not load.'
+        " Reload the page, or enable JavaScript if it is switched off.</p>"
+        if script_required
+        else ""
+    )
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -283,11 +296,21 @@ def render_login_page() -> str:
       <p class="form-kicker">Private research platform</p>
       <h2>Welcome back</h2>
       <p>Sign in with your research account to open the live builder.</p>
-      <form id="login-form">
+      {script_required_html}
+      <!-- method and action are the fallback, not the path normally taken:
+           login.js intercepts submit and posts JSON to the same endpoint. They
+           matter because a form with neither defaults to GET on the current
+           URL, which put the password in the query string -- and so into the
+           address bar, browser history, access logs, and the Referer header of
+           every request after it. That needs no-one to disable JavaScript: the
+           script is deferred, so the form is interactive while it is still
+           downloading. POST keeps the credentials in the body on every path. -->
+      <form id="login-form" method="post" action="/auth/login">
         <label>Username<input name="username" autocomplete="username" placeholder="Enter your username" required></label>
         <label>Password<input name="password" type="password" autocomplete="current-password" placeholder="Enter your password" required></label>
         <button class="btn btn-primary" type="submit">Sign in to Hawknetic Predictions &#8594;</button>
         <p id="login-status" role="status" aria-live="polite"></p>
+        <noscript><p class="login-boundary">Signing in needs JavaScript enabled.</p></noscript>
       </form>
       <div class="login-boundary">Research and decision support only. Your account cannot place or upload orders.</div>
     </main>
@@ -3252,6 +3275,16 @@ class PaperHandler(BaseHTTPRequestHandler):
         return bool(store and store.validate_csrf(token or "", self.headers.get("X-CSRF-Token")))
 
     def handle_login(self) -> None:
+        # A browser submitting the form itself sends it url-encoded, which only
+        # happens when `login.js` has not run: scripting off, the script failed
+        # to load, or it is still downloading. `<noscript>` covers the first of
+        # those and nothing covers the rest, so answering in JSON here left a
+        # raw `{"error": "invalid_login_payload"}` on screen with no hint that
+        # sign-in needs script. Say so in the page instead.
+        content_type = str(self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        if content_type == "application/x-www-form-urlencoded":
+            self.send_html(render_login_page(script_required=True), status_code=400)
+            return
         store = self.auth_store
         if store is None:
             self.send_json({"error": "user_auth_unconfigured"}, status_code=503)
