@@ -26,10 +26,10 @@ from .slip_analysis import (
     correlation_matrix,
     simulate_correlation_adjustment,
 )
+from .slip_safety import gate_slip_payload
 
 if TYPE_CHECKING:
     from .evaluation.decision import ResearchDecisionPolicy
-from .slip_safety import gate_slip_payload
 
 # Sized from the standard error on the correlation *adjustment*, which is what
 # the simulation is actually for -- the independent part is exact. At 4,000
@@ -594,8 +594,16 @@ def selection_text_for_leg(leg: dict[str, Any]) -> str:
     return str(leg.get("subtitle") or leg.get("title") or leg.get("display_event") or leg.get("market_ticker") or "")
 
 
-def combo_rejection_reasons_for_leg(leg: dict[str, Any], *, require_supported_market: bool = False) -> list[str]:
-    reasons = authoritative_combo_leg_rejection_reasons(leg)
+def combo_rejection_reasons_for_leg(
+    leg: dict[str, Any],
+    *,
+    require_supported_market: bool = False,
+    require_tradable_combo: bool = True,
+) -> list[str]:
+    reasons = authoritative_combo_leg_rejection_reasons(
+        leg,
+        require_tradable_quote=require_tradable_combo,
+    )
     side = str(leg.get("side") or "").lower()
     status = str(leg.get("status") or "").lower()
     if not leg.get("market_ticker"):
@@ -628,13 +636,19 @@ def manual_entry_warnings_for_leg(leg: dict[str, Any]) -> list[str]:
     return sorted(set(warnings))
 
 
-def annotate_combo_leg(leg: dict[str, Any], *, require_supported_market: bool = False) -> dict[str, Any]:
+def annotate_combo_leg(
+    leg: dict[str, Any],
+    *,
+    require_supported_market: bool = False,
+    require_tradable_combo: bool = True,
+) -> dict[str, Any]:
     annotated = dict(leg)
     category = combo_category_for_leg(annotated)
     overlap_key = annotated.get("overlap_key") or overlap_key_for_leg(annotated)
     rejection_reasons = combo_rejection_reasons_for_leg(
         annotated,
         require_supported_market=require_supported_market,
+        require_tradable_combo=require_tradable_combo,
     )
     warnings = manual_entry_warnings_for_leg(annotated)
     selection = selection_text_for_leg(annotated)
@@ -919,6 +933,7 @@ def verified_combo_market_legs(
     max_leg_probability: float,
     yyyymmdd: str | None,
     require_supported_market: bool,
+    require_tradable_combo: bool = True,
     intel_by_overlap_key: dict[str, float] | None = None,
 ) -> list[dict[str, Any]]:
     ticker = str(market.get("ticker") or "")
@@ -926,7 +941,7 @@ def verified_combo_market_legs(
     raw_legs = list(market.get("leg_details") or [])
     if not ticker.startswith("KXMVE") or status not in {"active", "open"} or not market.get("real_data_ready"):
         return []
-    if not market_is_tradable(market) or not raw_legs:
+    if (require_tradable_combo and not market_is_tradable(market)) or not raw_legs:
         return []
     expected_signature = combo_leg_signature(raw_legs)
     selected: list[dict[str, Any]] = []
@@ -961,7 +976,11 @@ def verified_combo_market_legs(
             min(100.0, exact_bet_score(candidate) + candidate["public_intel_score"]),
             2,
         )
-        candidate = annotate_combo_leg(candidate, require_supported_market=require_supported_market)
+        candidate = annotate_combo_leg(
+            candidate,
+            require_supported_market=require_supported_market,
+            require_tradable_combo=require_tradable_combo,
+        )
         if candidate.get("combo_market_ticker") != ticker:
             return []
         if candidate.get("combo_market_leg_signature") != expected_signature:
@@ -978,7 +997,10 @@ def verified_combo_market_legs(
             return []
         overlap_keys.add(candidate["overlap_key"])
         selected.append(candidate)
-    if authoritative_combo_slip_rejection_reasons(selected):
+    if authoritative_combo_slip_rejection_reasons(
+        selected,
+        require_tradable_quote=require_tradable_combo,
+    ):
         return []
     return selected
 
@@ -1470,6 +1492,7 @@ def _combo_tier_source_summary(
 ) -> dict[str, int]:
     exact_contract_count = 0
     eligible_exact_combo_count = 0
+    rfq_watchlist_count = 0
     for market in markets:
         legs = verified_combo_market_legs(
             market,
@@ -1477,15 +1500,20 @@ def _combo_tier_source_summary(
             max_leg_probability=max_leg_probability,
             yyyymmdd=yyyymmdd,
             require_supported_market=require_supported_market,
+            require_tradable_combo=False,
         )
         if not legs:
             continue
         exact_contract_count += 1
         if min_legs <= len(legs) <= max_legs:
-            eligible_exact_combo_count += 1
+            if market_is_tradable(market):
+                eligible_exact_combo_count += 1
+            elif combo_public_quote_state(market) == "rfq_required":
+                rfq_watchlist_count += 1
     return {
         "exact_contract_count": exact_contract_count,
         "eligible_exact_combo_count": eligible_exact_combo_count,
+        "rfq_watchlist_count": rfq_watchlist_count,
     }
 
 
@@ -1514,11 +1542,15 @@ def build_combo_source_summary(
             max_leg_probability=0.99,
             yyyymmdd=yyyymmdd,
             require_supported_market=False,
+            require_tradable_combo=False,
         )
     )
     return {
         "active_kxmve_market_count": len(active_markets),
         "tradable_kxmve_market_count": sum(1 for market in active_markets if market_is_tradable(market)),
+        "rfq_required_kxmve_market_count": sum(
+            1 for market in active_markets if combo_public_quote_state(market) == "rfq_required"
+        ),
         "verified_current_day_contract_count": verified_current_day_contract_count,
         "tiers": {
             "primary": _combo_tier_source_summary(
@@ -1683,8 +1715,18 @@ def enrich_combo_market(http: HttpClient, market: dict[str, Any], market_cache: 
             "source_freshness_state": source_freshness_state,
             "market_product_type": "cross_game_combo",
             "combo_ev_cents": combo_ev_cents,
+            "public_quote_state": combo_public_quote_state(market),
+            "public_quote_message": (
+                "Kalshi requires an authenticated RFQ for this exact combo; the public orderbook has no executable price."
+                if combo_public_quote_state(market) == "rfq_required"
+                else "Public Kalshi combo quote is available."
+                if combo_public_quote_state(market) == "tradable"
+                else "No public executable combo quote is available."
+            ),
             "real_data_warning": (
-                "All leg probabilities are market-implied from live Kalshi bid/ask, not predictive model guarantees."
+                "Underlying leg probabilities are live and market-implied; the exact combo still requires an RFQ price."
+                if missing_leg_count == 0 and combo_public_quote_state(market) == "rfq_required"
+                else "All leg probabilities are market-implied from live Kalshi bid/ask, not predictive model guarantees."
                 if missing_leg_count == 0
                 else "Some underlying legs could not be priced from public Kalshi data."
             ),
@@ -1777,6 +1819,31 @@ def fetch_kalshi_combo_markets(http: HttpClient, limit: int = 100) -> list[dict[
 def market_is_tradable(market: dict[str, Any]) -> bool:
     ask = market.get("yes_ask_cents")
     return ask is not None and 0 < ask < 100
+
+
+def combo_public_quote_state(market: dict[str, Any]) -> str:
+    """Classify an exact Kalshi combo without inventing a public executable price."""
+    if market_is_tradable(market):
+        return "tradable"
+    ticker = str(market.get("ticker") or "").upper()
+    status = str(market.get("status") or "").lower()
+    try:
+        yes_ask = float(market.get("yes_ask_cents") or 0)
+        yes_bid = float(market.get("yes_bid_cents") or 0)
+        no_ask = float(market.get("no_ask_cents") or 0)
+        no_bid = float(market.get("no_bid_cents") or 0)
+    except (TypeError, ValueError):
+        return "unavailable"
+    if (
+        ticker.startswith("KXMVE")
+        and status in {"active", "open"}
+        and yes_ask == 0
+        and yes_bid == 0
+        and no_ask == 100
+        and no_bid == 100
+    ):
+        return "rfq_required"
+    return "unavailable"
 
 
 def _yes_spread_cents(market: dict[str, Any]) -> Decimal | None:

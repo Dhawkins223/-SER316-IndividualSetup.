@@ -15,6 +15,34 @@ contract, and deployment gate are documented in `docs/cloud-source-data.md`.
 
 Every worker uses PostgreSQL-backed idempotency, heartbeat, failure counts, source freshness, bounded retry/backoff, structured logs, graceful shutdown, and transactional checkpoints. A failure in one worker must not alter records owned by another worker or stop the web service.
 
+## Normalized research data
+
+The research-model-refresh worker is the bridge between fresh normalized
+Kalshi market observations and the otherwise-empty research schema. Every hour
+it selects the latest fresh observation for each open market and writes:
+
+- a code-commit-pinned baseline-only model version;
+- immutable point-in-time feature snapshots;
+- a completed forward prediction run;
+- one zero-edge, no-edge prediction per market; and
+- a sample-size coverage metric.
+
+The worker intentionally sets the predicted probability equal to market
+consensus. This establishes complete lineage and gives the platform real
+normalized research data without presenting an exchange quote as an
+independently validated algorithm. A repeat cycle over the same dataset hash is
+a no-op.
+
+Deploy it with railway.worker.json, DATABASE_MIGRATION_MODE=check, and:
+
+    HAWKNETIC_SERVICE=research-model-refresh
+    RESEARCH_BASELINE_MAX_AGE_SECONDS=1800
+    RESEARCH_BASELINE_MAX_MARKETS=1000
+
+It requires the same research-only safety flags as every other hosted worker.
+Verify it in staging before production and require fresh kalshi_public_api
+source health.
+
 Do not start workers from a migration pre-deploy command. Optional connector failures appear in worker status and block only their dependent workflow.
 
 ## Worker services use `railway.worker.json`
@@ -36,6 +64,7 @@ Backoff doubles from `initial_backoff_seconds` until it reaches the worker's own
 | Worker | Cadence | Retry schedule (seconds) |
 | --- | ---: | --- |
 | `kalshi-market-ingestion` | 300 | 2, 4, 8, 16, 32, 64, 128, 256, then 300 |
+| `research-model-refresh` | 3600 | 2, 4, 8, …, 1024, 2048, then 3600 |
 | `sports-research` | 3600 | 2, 4, 8, …, 1024, 2048, then 3600 |
 | `reporting-evaluation` | 21600 | 2, 4, 8, …, 8192, 16384, then 21600 |
 
@@ -43,6 +72,11 @@ The first version of this capped the *exponent* at four steps rather than clampi
 
 This does not mask failures. An operation that fails is still recorded through the existing failure path, still increments `consecutive_failures`, and still alerts. Only the loop's survival changed.
 
+Production currently runs the web service, kalshi-market-ingestion,
+sports-research, settlement-worker, and raw-retention. Crypto, external-source,
+research-model-refresh, and reporting-evaluation remain undeployed.
+docs/sports-data-upload.md documents the sports worker and the states its board
+reports.
 ## Which workers are deployed is currently unsettled
 
 This file and `docs/sports-data-upload.md` disagree, and neither can be trusted

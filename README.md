@@ -185,6 +185,11 @@ Hosted staging and production are separate from local development and must use d
 - The sports board (`/sports.json` and the dashboard's sports panel) reads the rows the `sports-research` worker uploads. It reports `fresh`, `stale`, `blocked`, `empty`, or `unavailable` explicitly and withholds rows in every state except `fresh`. Each market publishes both the shopper's de-vig of the best available prices and the books' own consensus — each book de-vigged on its own, then the median — plus the signed gap between them. See `docs/sports-data-upload.md`.
 - Closing line value (`/sports-clv.json`, `sports-clv`) grades each recorded price against the last pre-start quote posted by the same bookmaker for the same market. It is a price comparison in probability points, not profit and not a settled result.
 - Other worker roles use the names documented by `python -m kalshi_research_bot worker --help`; they remain isolated from the web process.
+- The research-model-refresh worker converts each fresh Kalshi snapshot into
+  point-in-time feature snapshots, a versioned baseline run, zero-edge
+  predictions, and a coverage metric in the normalized research schema. It is
+  explicitly baseline-only: it does not claim an independent model edge or
+  create a research candidate.
 - `HAWKNETIC_SERVICE_MODE` selects how a worker runs. `loop` (the default) keeps the process resident and uses the worker's own cadence. `once` runs a single cycle and exits, so an hourly or slower worker can be a scheduled scale-to-zero service instead of a container that spends almost all of its life asleep. Switching is one variable and involves no data or schema change; an overlapping cron run and loop worker record `skipped_duplicate` rather than collecting twice. See `docs/DEPLOYMENT.md`.
 
 - `docs/data-sources.md`

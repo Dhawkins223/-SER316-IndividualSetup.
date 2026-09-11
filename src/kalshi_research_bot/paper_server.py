@@ -1142,15 +1142,81 @@ def render_market_browser(payload: dict) -> str:
     return f'<div class="data-rows">{rows}</div>'
 
 
+def market_public_quote_state(market: dict) -> str:
+    """Whether this exact combo has a public price, needs an RFQ, or has neither.
+
+    The collector records the answer on the market; recomputing it here is the
+    fallback for a snapshot written before it did. An all-or-nothing book on a
+    live KXMVE contract -- nothing bid on YES, NO offered at the full dollar --
+    is not a market priced at zero. It is Kalshi declining to quote the
+    combination publicly, which is a state the row has to name rather than
+    print as `0.00c`.
+    """
+    explicit = str(market.get("public_quote_state") or "").lower()
+    if explicit in {"tradable", "rfq_required", "unavailable"}:
+        return explicit
+    try:
+        yes_ask = float(market.get("yes_ask_cents") or 0)
+        yes_bid = float(market.get("yes_bid_cents") or 0)
+        no_ask = float(market.get("no_ask_cents") or 0)
+        no_bid = float(market.get("no_bid_cents") or 0)
+    except (TypeError, ValueError):
+        return "unavailable"
+    if 0 < yes_ask < 100:
+        return "tradable"
+    if (
+        str(market.get("ticker") or "").upper().startswith("KXMVE")
+        and str(market.get("status") or "").lower() in {"active", "open"}
+        and (yes_ask, yes_bid, no_ask, no_bid) == (0, 0, 100, 100)
+    ):
+        return "rfq_required"
+    return "unavailable"
+
+
 def render_market_browser_row(market: dict) -> str:
     ticker = str(market.get("ticker") or "Unidentified contract")
     title = str(market.get("title") or ticker)
     legs = list(market.get("leg_details") or [])
     leg_count = len(legs) or len(market.get("legs") or [])
     ready = bool(market.get("real_data_ready"))
-    status_text = "Verified" if ready else "Incomplete"
-    status_class = "good" if ready else "warning"
+    quote_state = market_public_quote_state(market)
+    if ready and quote_state == "rfq_required":
+        status_text = "RFQ required"
+        status_class = "warning"
+        yes_quote = "RFQ required"
+        no_quote = "No public quote"
+        quote_message = str(
+            market.get("public_quote_message")
+            or "Kalshi requires an authenticated RFQ for this exact combo; the public orderbook has no executable price."
+        )
+    elif ready and quote_state == "tradable":
+        status_text = "Verified"
+        status_class = "good"
+        yes_quote = f"{money(market.get('yes_ask_cents'))}c"
+        no_quote = f"{money(market.get('no_ask_cents'))}c"
+        quote_message = str(market.get("real_data_warning") or "Prices come straight from Kalshi.")
+    else:
+        status_text = "Incomplete"
+        status_class = "warning"
+        yes_quote = "Unavailable"
+        no_quote = "Unavailable"
+        quote_message = str(
+            market.get("real_data_warning") or "No public executable combo quote is available."
+        )
     close_text = display_event_time(market.get("close_time"))
+    # The legs carry live prices even when the combination itself does not, and
+    # saying how many is what separates "we have no data" from "Kalshi will not
+    # quote this publicly yet".
+    priced_probabilities = [
+        float(leg["market_implied_probability"]) * 100
+        for leg in legs
+        if leg.get("market_implied_probability") is not None
+    ]
+    probability_preview = " · ".join(f"{value:.1f}%" for value in priced_probabilities[:4])
+    leg_price_summary = (
+        f"{len(priced_probabilities)} priced underlying legs"
+        + (f" · {probability_preview}" if probability_preview else "")
+    )
     detail_items = "".join(render_market_preview_leg(leg) for leg in legs)
     if not detail_items:
         detail_items = '<li>Underlying leg details are not available.</li>'
@@ -1161,16 +1227,17 @@ def render_market_browser_row(market: dict) -> str:
         <div>
           <strong>{html.escape(title)}</strong>
           <small>{html.escape(ticker)} · {leg_count} exact legs · closes {html.escape(close_text)}</small>
+          <small>{html.escape(leg_price_summary)}</small>
         </div>
       </div>
-      <div class="quote-cell"><small>YES ask</small><strong>{money(market.get("yes_ask_cents"))}c</strong></div>
-      <div class="quote-cell"><small>NO ask</small><strong>{money(market.get("no_ask_cents"))}c</strong></div>
+      <div class="quote-cell"><small>Combo YES</small><strong>{html.escape(yes_quote)}</strong></div>
+      <div class="quote-cell"><small>Combo NO</small><strong>{html.escape(no_quote)}</strong></div>
       <div class="quote-cell"><small>24h volume</small><strong>{html.escape(str(market.get("volume_24h") or "n/a"))}</strong></div>
       <span class="badge {status_class}">{status_text}</span>
       <details class="row-details">
         <summary>Inspect listed legs</summary>
         <ul>{detail_items}</ul>
-        <p>{html.escape(str(market.get("real_data_warning") or "Prices come straight from Kalshi."))}</p>
+        <p>{html.escape(quote_message)}</p>
       </details>
     </article>
     """
@@ -1873,6 +1940,16 @@ def render_dashboard(
         else "Live market data"
     )
     verified_contracts = int(summary.get("verified_current_day_contract_count") or 0)
+    # A contract being open is not the same as it having a price you can act
+    # on. The browser below prints "RFQ required" on the individual rows, so
+    # the panel's own line says how many of them to expect.
+    rfq_contracts = int(summary.get("rfq_required_kxmve_market_count") or 0)
+    market_browser_summary = (
+        f"{len(markets)} combo contracts open for review right now."
+        if not rfq_contracts
+        else f"{len(markets)} combo contracts open for review right now · "
+        f"{rfq_contracts} awaiting an RFQ before a combo price exists."
+    )
     # Only the tiers this viewer can open. Counting the research-scout tier for
     # a reader gave them a denominator for a panel that is not on their page.
     visible_slips = [primary_slip, leverage_slip, all_day_slip]
@@ -2066,7 +2143,7 @@ def render_dashboard(
       <section class="panel" id="market-browser">
         <div class="section-head">
           <div><span class="section-label">Live market</span><h2>Kalshi contracts</h2></div>
-          <p>{len(markets)} combo contracts open for review right now.</p>
+          <p>{html.escape(market_browser_summary)}</p>
         </div>
         {render_market_browser(payload)}
       </section>
@@ -2653,12 +2730,28 @@ def combo_source_context(source_payload: dict | None, slip_key: str | None = Non
         f"Kalshi has {active_count} combo contracts open; "
         f"{verified_count} are confirmed for today's games."
     )
+    # "Confirmed for today" and "you can actually buy it" are different
+    # questions, and a contract can pass the first and fail the second. Saying
+    # only the first number invites a reader to go looking for a price that is
+    # not there.
+    rfq_count = int(summary.get("rfq_required_kxmve_market_count") or 0)
+    if rfq_count:
+        base += f" {rfq_count} have no public price until someone requests a quote."
     if not slip_key:
         return base
     tier = (summary.get("tiers") or {}).get(slip_key) or {}
     eligible_count = int(tier.get("eligible_exact_combo_count") or 0)
+    watchlist_count = int(tier.get("rfq_watchlist_count") or 0)
     if eligible_count:
         return f"{base} {eligible_count} fit this tier."
+    if watchlist_count:
+        # Not the same as "none fit". These match the tier's rules on every leg
+        # and are held back only by the missing combo price, so the honest
+        # answer is a watchlist rather than an empty tier.
+        return (
+            f"{base} {watchlist_count} match this tier's rules on every leg, but stay "
+            "watchlist-only until an RFQ supplies an executable combo price."
+        )
     return f"{base} None fit this tier, so there is nothing to show here."
 
 

@@ -332,6 +332,48 @@ class QualityTests(unittest.TestCase):
         self.assertIn("81.0%", rendered)
         self.assertNotIn("Add to Slip", rendered)
 
+    def test_dashboard_labels_unpriced_combo_as_rfq_watchlist_with_visible_leg_prices(self):
+        payload = {
+            "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "custom_slip": {"action": "NO_SLIP", "reason": "Public combo quote required.", "leg_count": 0},
+            "combo_source_summary": {
+                "active_kxmve_market_count": 1,
+                "verified_current_day_contract_count": 1,
+                "tradable_kxmve_market_count": 0,
+                "rfq_required_kxmve_market_count": 1,
+                "tiers": {"primary": {"eligible_exact_combo_count": 0, "rfq_watchlist_count": 1}},
+            },
+            "markets": [
+                {
+                    "ticker": "KXMVE-RFQ-1",
+                    "title": "Exact RFQ combination",
+                    "status": "active",
+                    "real_data_ready": True,
+                    "yes_ask_cents": 0,
+                    "yes_bid_cents": 0,
+                    "no_ask_cents": 100,
+                    "no_bid_cents": 100,
+                    "close_time": "2099-07-03T20:00:00+00:00",
+                    "leg_details": [
+                        {
+                            "display_event": "Detroit vs Texas",
+                            "side": "yes",
+                            "subtitle": "Over 3.5 runs",
+                            "market_implied_probability": 0.81,
+                        }
+                    ],
+                }
+            ],
+        }
+
+        rendered = render_dashboard(payload)
+
+        self.assertIn("1 awaiting an RFQ before a combo price exists", rendered)
+        self.assertIn("RFQ required", rendered)
+        self.assertIn("1 priced underlying legs · 81.0%", rendered)
+        self.assertNotIn("0.00c", rendered)
+        self.assertIn("watchlist-only until an RFQ supplies an executable combo price", rendered)
+
     def test_dashboard_uses_the_postgres_collector_snapshot(self):
         payload = self._refresh_fixture_payload()
         payload["dashboard_snapshot"] = {"source": "postgres"}

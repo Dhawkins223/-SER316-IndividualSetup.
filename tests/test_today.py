@@ -160,6 +160,41 @@ class TodayTests(unittest.TestCase):
         self.assertEqual(summary["tiers"]["primary"]["eligible_exact_combo_count"], 0)
         self.assertEqual(summary["tiers"]["leverage"]["eligible_exact_combo_count"], 0)
 
+    def test_unpriced_rfq_combo_counts_as_exact_evidence_but_never_as_tradable(self):
+        legs = [
+            _priced_leg(f"MKT-{index}", f"EVT-{index}", "Over 3.5 runs scored", 0.85)
+            for index in range(8)
+        ]
+        market = _verified_combo_market(legs)
+        market.update(
+            {
+                "yes_ask_cents": 0,
+                "yes_bid_cents": 0,
+                "no_ask_cents": 100,
+                "no_bid_cents": 100,
+            }
+        )
+        for leg in market["leg_details"]:
+            leg["combo_market_yes_ask_cents"] = 0
+            leg["combo_market_yes_bid_cents"] = 0
+
+        summary = build_combo_source_summary(
+            [market],
+            "20260703",
+            primary_min_leg_probability=0.80,
+            primary_max_leg_probability=0.985,
+            primary_min_legs=8,
+            primary_max_legs=20,
+            leverage_min_leg_probability=0.75,
+        )
+
+        self.assertEqual(summary["verified_current_day_contract_count"], 1)
+        self.assertEqual(summary["tradable_kxmve_market_count"], 0)
+        self.assertEqual(summary["rfq_required_kxmve_market_count"], 1)
+        self.assertEqual(summary["tiers"]["primary"]["rfq_watchlist_count"], 1)
+        self.assertEqual(summary["tiers"]["primary"]["eligible_exact_combo_count"], 0)
+        self.assertEqual(build_custom_slip([market], yyyymmdd="20260703")["action"], "NO_SLIP")
+
     def test_cents_from_dollars(self):
         self.assertEqual(cents_from_dollars("0.8750"), 87.5)
         self.assertIsNone(cents_from_dollars(""))
