@@ -26,7 +26,11 @@ from .auth import (
     session_token_from_cookie,
     user_auth_enabled,
 )
-from .combo_safety import combo_public_quote_state, slip_has_authoritative_combo_evidence
+from .combo_safety import (
+    combo_public_quote_state,
+    combo_quote_message,
+    slip_has_authoritative_combo_evidence,
+)
 from .dashboard_assets import (
     LOGIN_SCRIPT,
     OPS_SCRIPT,
@@ -1177,10 +1181,11 @@ def render_market_browser_row(market: dict) -> str:
         status_class = "warning"
         yes_quote = "RFQ required"
         no_quote = "No public quote"
-        quote_message = str(
-            market.get("public_quote_message")
-            or "No executable combo price is quoted publicly; this exact combination needs an authenticated Kalshi RFQ before it has one."
-        )
+        # Derived, not read back off the market. `public_quote_message` says
+        # nothing the state does not, so a snapshot stamped by an older
+        # collector would otherwise keep showing that collector's wording --
+        # which is how the previous phrasing survived being replaced here.
+        quote_message = combo_quote_message(market)
     elif ready and quote_state == "tradable":
         status_text = "Verified"
         status_class = "good"

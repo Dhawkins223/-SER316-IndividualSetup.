@@ -9,9 +9,42 @@ VERIFIED_COMBO_EVIDENCE = "listed_kalshi_mve_market"
 VERIFIED_COMBO_SOURCE = "kalshi_public_mve_market"
 
 
+# The message is a function of the quote state and nothing else, so it belongs
+# beside the state rather than being stamped onto every market and read back.
+# Two copies of the wording drift exactly the way two copies of the classifier
+# did.
+COMBO_QUOTE_MESSAGES = {
+    "tradable": "Public Kalshi combo quote is available.",
+    # What is observed is that nothing executable is quoted. The RFQ is named
+    # as what would produce a price, not asserted as the exchange's reason.
+    "rfq_required": (
+        "No executable combo price is quoted publicly; this exact combination "
+        "needs an authenticated Kalshi RFQ before it has one."
+    ),
+    "unavailable": "No public executable combo quote is available.",
+}
+
+
 def market_is_tradable(market: dict[str, Any]) -> bool:
-    ask = market.get("yes_ask_cents")
-    return ask is not None and 0 < ask < 100
+    """Is there a YES ask a reader could actually pay?
+
+    The comparison used to run on whatever the payload happened to hold, so a
+    `yes_ask_cents` that arrived as a non-numeric string raised TypeError
+    instead of answering. Only the collector called this, and it fed the
+    function its own freshly parsed rows; now the dashboard shares it, and a
+    stored snapshot with one malformed field must degrade to "not tradable"
+    rather than take the page down.
+    """
+    try:
+        ask = float(market.get("yes_ask_cents"))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return False
+    return 0 < ask < 100
+
+
+def combo_quote_message(market: dict[str, Any]) -> str:
+    """What to tell a reader about this combo's price."""
+    return COMBO_QUOTE_MESSAGES[combo_public_quote_state(market)]
 
 
 def combo_public_quote_state(market: dict[str, Any]) -> str:

@@ -4,8 +4,11 @@ from kalshi_research_bot.combo_safety import (
     VERIFIED_COMBO_EVIDENCE,
     VERIFIED_COMBO_SOURCE,
     authoritative_combo_slip_rejection_reasons,
+    COMBO_QUOTE_MESSAGES,
     combo_leg_signature,
     combo_public_quote_state,
+    combo_quote_message,
+    market_is_tradable,
     slip_has_authoritative_combo_evidence,
 )
 
@@ -147,10 +150,51 @@ class ComboPublicQuoteStateTests(unittest.TestCase):
         self.assertEqual(combo_public_quote_state({"ticker": "KXMVE-1", "status": "active"}), "unavailable")
 
     def test_an_unparseable_quote_is_unavailable(self):
-        self.assertEqual(
-            combo_public_quote_state({**self.RFQ_BOOK, "no_ask_cents": "not-a-number"}),
-            "unavailable",
+        # Every field, not just the ones the classifier parses inside its own
+        # try/except. A first version of this test only dirtied `no_ask_cents`
+        # and so never reached `market_is_tradable`, which read `yes_ask_cents`
+        # ahead of that guard and raised TypeError on the way past it.
+        for field in ("yes_ask_cents", "yes_bid_cents", "no_ask_cents", "no_bid_cents"):
+            with self.subTest(field=field):
+                self.assertEqual(
+                    combo_public_quote_state({**self.RFQ_BOOK, field: "not-a-number"}),
+                    "unavailable",
+                )
+
+    def test_a_malformed_ask_is_not_tradable_rather_than_an_exception(self):
+        for ask in ("not-a-number", None, object()):
+            with self.subTest(ask=ask):
+                self.assertFalse(market_is_tradable({"yes_ask_cents": ask}))
+        self.assertFalse(market_is_tradable({}))
+
+    def test_a_numeric_string_ask_still_reads_as_a_price(self):
+        self.assertTrue(market_is_tradable({"yes_ask_cents": "81"}))
+
+
+class ComboQuoteMessageTests(unittest.TestCase):
+    def test_the_message_follows_the_state(self):
+        for state, market in (
+            ("tradable", {**ComboPublicQuoteStateTests.RFQ_BOOK, "yes_ask_cents": 81}),
+            ("rfq_required", ComboPublicQuoteStateTests.RFQ_BOOK),
+            ("unavailable", {"ticker": "KXMVE-1", "status": "settled"}),
+        ):
+            with self.subTest(state=state):
+                self.assertEqual(combo_quote_message(market), COMBO_QUOTE_MESSAGES[state])
+
+    def test_the_rfq_message_reports_the_observation_before_naming_the_rfq(self):
+        message = COMBO_QUOTE_MESSAGES["rfq_required"]
+        self.assertIn("No executable combo price is quoted publicly", message)
+        # The old wording opened by asserting the exchange's reason, which is
+        # inferred from the orderbook shape rather than reported by Kalshi.
+        self.assertFalse(message.startswith("Kalshi requires"))
+
+    def test_a_stamped_message_from_an_older_collector_does_not_survive(self):
+        superseded = (
+            "Kalshi requires an authenticated RFQ for this exact combo; "
+            "the public orderbook has no executable price."
         )
+        stale = {**ComboPublicQuoteStateTests.RFQ_BOOK, "public_quote_message": superseded}
+        self.assertEqual(combo_quote_message(stale), COMBO_QUOTE_MESSAGES["rfq_required"])
 
 
 if __name__ == "__main__":

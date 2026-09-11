@@ -19,6 +19,7 @@ from .combo_safety import (
     authoritative_combo_slip_rejection_reasons,
     combo_leg_signature,
     combo_public_quote_state,
+    combo_quote_message,
     market_is_tradable,
 )
 from .connectors.http import HttpClient
@@ -1718,13 +1719,7 @@ def enrich_combo_market(http: HttpClient, market: dict[str, Any], market_cache: 
             "market_product_type": "cross_game_combo",
             "combo_ev_cents": combo_ev_cents,
             "public_quote_state": combo_public_quote_state(market),
-            "public_quote_message": (
-                "Kalshi requires an authenticated RFQ for this exact combo; the public orderbook has no executable price."
-                if combo_public_quote_state(market) == "rfq_required"
-                else "Public Kalshi combo quote is available."
-                if combo_public_quote_state(market) == "tradable"
-                else "No public executable combo quote is available."
-            ),
+            "public_quote_message": combo_quote_message(market),
             "real_data_warning": (
                 "Underlying leg probabilities are live and market-implied; the exact combo still requires an RFQ price."
                 if missing_leg_count == 0 and combo_public_quote_state(market) == "rfq_required"
