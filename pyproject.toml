@@ -12,7 +12,7 @@ dependencies = [
 # Development only -- nothing here is imported at runtime, so the wheel is
 # unchanged. Pinned exactly: an unpinned linter turns someone else's release
 # into a red build on a pull request that did not touch the code it flags.
-dev = ["ruff==0.15.8"]
+dev = ["ruff==0.16.6"]
 browser = ["playwright==1.62.0"]
 
 # Only `scripts/optimize_dashboard_fonts.py` needs these, and only when the
