@@ -9,6 +9,94 @@ VERIFIED_COMBO_EVIDENCE = "listed_kalshi_mve_market"
 VERIFIED_COMBO_SOURCE = "kalshi_public_mve_market"
 
 
+# The message is a function of the quote state and nothing else, so it belongs
+# beside the state rather than being stamped onto every market and read back.
+# Two copies of the wording drift exactly the way two copies of the classifier
+# did.
+COMBO_QUOTE_MESSAGES = {
+    "tradable": "Public Kalshi combo quote is available.",
+    # What is observed is that nothing executable is quoted. The RFQ is named
+    # as what would produce a price, not asserted as the exchange's reason.
+    "rfq_required": (
+        "No executable combo price is quoted publicly; this exact combination "
+        "needs an authenticated Kalshi RFQ before it has one."
+    ),
+    "unavailable": "No public executable combo quote is available.",
+}
+
+
+def market_is_tradable(market: dict[str, Any]) -> bool:
+    """Is there a YES ask a reader could actually pay?
+
+    The comparison used to run on whatever the payload happened to hold, so a
+    `yes_ask_cents` that arrived as a non-numeric string raised TypeError
+    instead of answering. Only the collector called this, and it fed the
+    function its own freshly parsed rows; now the dashboard shares it, and a
+    stored snapshot with one malformed field must degrade to "not tradable"
+    rather than take the page down.
+
+    OverflowError is in the list because JSON has no integer bound: a literal
+    of a few hundred digits parses to a Python int that `float()` refuses, and
+    that is neither a TypeError nor a ValueError.
+    """
+    try:
+        ask = float(market.get("yes_ask_cents"))  # type: ignore[arg-type]
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return 0 < ask < 100
+
+
+def combo_quote_message(market: dict[str, Any]) -> str:
+    """What to tell a reader about this combo's price."""
+    return COMBO_QUOTE_MESSAGES[combo_public_quote_state(market)]
+
+
+def combo_public_quote_state(market: dict[str, Any]) -> str:
+    """Classify an exact Kalshi combo without inventing a public executable price.
+
+    This lives here rather than in `today.py` because both the collector that
+    stamps `public_quote_state` and the dashboard that renders it need the same
+    answer, and `paper_server` cannot import `today` at module scope without
+    reintroducing the evaluation cycle 4790889 fixed. One copy, in the leaf
+    module they both already import, is what stops the two from drifting.
+
+    A stamped `public_quote_state` wins: the collector saw the market at
+    collection time, and re-deriving from a snapshot that may have been
+    normalised since would second-guess it. Everything below is the fallback
+    for a payload written before the field existed.
+
+    The all-or-nothing book -- nothing bid on YES, NO offered at the full
+    dollar -- is the shape Kalshi leaves on a combination it will not quote
+    publicly. It is inferred from the orderbook, not reported by the API, so
+    what the dashboard says about it stays on the observation ("no executable
+    price is quoted") rather than asserting the exchange's intent.
+    """
+    stamped = str(market.get("public_quote_state") or "").lower()
+    if stamped in {"tradable", "rfq_required", "unavailable"}:
+        return stamped
+    if market_is_tradable(market):
+        return "tradable"
+    ticker = str(market.get("ticker") or "").upper()
+    status = str(market.get("status") or "").lower()
+    try:
+        yes_ask = float(market.get("yes_ask_cents") or 0)
+        yes_bid = float(market.get("yes_bid_cents") or 0)
+        no_ask = float(market.get("no_ask_cents") or 0)
+        no_bid = float(market.get("no_bid_cents") or 0)
+    except (TypeError, ValueError, OverflowError):
+        return "unavailable"
+    if (
+        ticker.startswith("KXMVE")
+        and status in {"active", "open"}
+        and yes_ask == 0
+        and yes_bid == 0
+        and no_ask == 100
+        and no_bid == 100
+    ):
+        return "rfq_required"
+    return "unavailable"
+
+
 def combo_leg_signature(legs: list[dict[str, Any]]) -> str:
     selected = sorted(
         (
@@ -53,7 +141,7 @@ def authoritative_combo_leg_rejection_reasons(
     if require_tradable_quote:
         try:
             live_quote = float(combo_quote)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             live_quote = 0.0
         if not 0.0 < live_quote < 100.0:
             reasons.append("combo_quote_not_tradable")
