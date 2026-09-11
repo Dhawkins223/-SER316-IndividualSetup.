@@ -44,7 +44,7 @@ jobs:
         run: python -m playwright install --with-deps chromium
       - name: Check all dashboard roles, states, and widths
         run: python scripts/browser_smoke.py
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: dashboard-browser-checks
