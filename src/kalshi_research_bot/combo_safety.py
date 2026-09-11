@@ -34,10 +34,14 @@ def market_is_tradable(market: dict[str, Any]) -> bool:
     function its own freshly parsed rows; now the dashboard shares it, and a
     stored snapshot with one malformed field must degrade to "not tradable"
     rather than take the page down.
+
+    OverflowError is in the list because JSON has no integer bound: a literal
+    of a few hundred digits parses to a Python int that `float()` refuses, and
+    that is neither a TypeError nor a ValueError.
     """
     try:
         ask = float(market.get("yes_ask_cents"))  # type: ignore[arg-type]
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return False
     return 0 < ask < 100
 
@@ -79,7 +83,7 @@ def combo_public_quote_state(market: dict[str, Any]) -> str:
         yes_bid = float(market.get("yes_bid_cents") or 0)
         no_ask = float(market.get("no_ask_cents") or 0)
         no_bid = float(market.get("no_bid_cents") or 0)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return "unavailable"
     if (
         ticker.startswith("KXMVE")

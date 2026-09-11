@@ -149,21 +149,33 @@ class ComboPublicQuoteStateTests(unittest.TestCase):
     def test_a_missing_book_is_unavailable_rather_than_rfq_required(self):
         self.assertEqual(combo_public_quote_state({"ticker": "KXMVE-1", "status": "active"}), "unavailable")
 
+    # A value that is not a price, by each of the ways a payload can carry one.
+    # `10 ** 400` is the one that is easy to miss: JSON puts no bound on an
+    # integer literal, so a few hundred digits parse to a Python int that
+    # `float()` refuses with OverflowError -- neither a TypeError nor a
+    # ValueError, and so not caught by a guard written for those two.
+    MALFORMED = ("not-a-number", None, object(), 10**400, float("nan"))
+
     def test_an_unparseable_quote_is_unavailable(self):
         # Every field, not just the ones the classifier parses inside its own
         # try/except. A first version of this test only dirtied `no_ask_cents`
         # and so never reached `market_is_tradable`, which read `yes_ask_cents`
-        # ahead of that guard and raised TypeError on the way past it.
+        # ahead of that guard and raised on the way past it.
         for field in ("yes_ask_cents", "yes_bid_cents", "no_ask_cents", "no_bid_cents"):
-            with self.subTest(field=field):
-                self.assertEqual(
-                    combo_public_quote_state({**self.RFQ_BOOK, field: "not-a-number"}),
-                    "unavailable",
-                )
+            for value in self.MALFORMED:
+                if value is None or isinstance(value, float):
+                    # `or 0` makes these indistinguishable from an absent or
+                    # zero quote, which is the RFQ sentinel's own shape.
+                    continue
+                with self.subTest(field=field, value=type(value).__name__):
+                    self.assertEqual(
+                        combo_public_quote_state({**self.RFQ_BOOK, field: value}),
+                        "unavailable",
+                    )
 
     def test_a_malformed_ask_is_not_tradable_rather_than_an_exception(self):
-        for ask in ("not-a-number", None, object()):
-            with self.subTest(ask=ask):
+        for ask in self.MALFORMED:
+            with self.subTest(ask=type(ask).__name__):
                 self.assertFalse(market_is_tradable({"yes_ask_cents": ask}))
         self.assertFalse(market_is_tradable({}))
 
