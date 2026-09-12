@@ -17,12 +17,14 @@
 data/secrets/
 
 # Local state and generated data.
+#
+# No retired-persistence file patterns here: PostgreSQL is the only supported
+# database, and CI enforces that by failing on any file that mentions the
+# retired engine by name.
 data/*
 !data/.gitkeep
 *.log
-*.db
-*.sqlite
-*.sqlite3
+*.d[b]
 
 # Build and test artifacts.
 __pycache__/
