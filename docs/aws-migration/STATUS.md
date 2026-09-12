@@ -278,6 +278,32 @@ which should be deliberate), or they were removed (so production is currently
 degraded). The prod Terraform defines all eight because the code does.
 **Confirm which before the first apply** — it changes the cost baseline.
 
+### The RDS master password rotates every seven days, and resident tasks will not notice
+
+`manage_master_user_password = true` means RDS generates the password and keeps
+it in Secrets Manager — and, per AWS, *"rotates the secret every seven days by
+default."* ECS resolves a container's `secrets` only at task start, so the web
+service and any `loop`-mode worker keep the password they were handed when they
+started.
+
+The symptom is not an outage at rotation. Established connections keep working;
+new ones fail, so it surfaces as intermittent authentication errors as the pool
+turns over — roughly a week after deploy, and weekly after. Scheduled workers
+are immune, because each run is a new task with freshly injected credentials.
+
+Nothing is deployed, so nothing is broken today. But this must be settled
+before production traffic moves, and the choice is the owner's:
+
+| Option | What it costs | What it leaves |
+| --- | --- | --- |
+| React: EventBridge on rotation → Lambda → `ecs:UpdateService --force-new-deployment` | A Lambda, a rule, an IAM role | A window of failures before the redeploy lands |
+| **Give the application its own database role** (recommended) | A database-level provisioning step Terraform does not do today | Nothing — the master user stops being the application user, which is the conventional posture anyway |
+| Resolve credentials at connect time in the application | Touches code shared with Railway, Codespaces and CI | Nothing, but it is the largest change |
+
+Recorded at both decision sites (`docker-entrypoint.sh`, `modules/rds/main.tf`)
+rather than fixed, because picking between these is an architecture decision on
+infrastructure that has not been applied.
+
 ### Two unidentified PostgreSQL services
 
 `Postgres-GDG0` and `Postgres` exist in the production environment alongside

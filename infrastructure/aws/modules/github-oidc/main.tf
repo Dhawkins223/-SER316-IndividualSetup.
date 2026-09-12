@@ -17,11 +17,24 @@
 #   repo:OWNER/REPO:*                       anything in the repo -- too broad
 #                                           for a deploy role
 #
-# The production role here is restricted to a GitHub *environment*, which is
-# the strongest of these: GitHub environments carry their own required-reviewer
+# The roles here are restricted to GitHub *environments*, which is the
+# strongest of these: GitHub environments carry their own required-reviewer
 # and branch rules, so the approval gate lives in GitHub and the `sub` claim
 # cannot be produced at all without passing it. A branch condition alone can be
 # satisfied by anyone who can push to that branch.
+#
+# ## `subjects` is an OR, so adding one widens the role
+#
+# Every entry becomes a value in a single StringLike condition, and IAM matches
+# a condition if *any* value matches. So a role listing both
+# `environment:terraform-plan-prod` and `ref:refs/heads/Master` is assumable by
+# any job on Master with no environment at all -- the environment gate is not
+# an additional requirement, it is an alternative one, and the weakest entry in
+# the list is the role's real boundary.
+#
+# Both stacks previously carried a branch subject next to the environment
+# subject, which read like defence in depth and was the opposite. List the
+# environment alone unless a workflow genuinely mints the other claim.
 
 data "aws_caller_identity" "current" {}
 

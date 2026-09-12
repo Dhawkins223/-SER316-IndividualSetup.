@@ -36,8 +36,17 @@ output "security_group_id" {
 output "master_user_secret_arn" {
   description = <<-EOT
     ARN of the RDS-managed Secrets Manager secret holding the master
-    credentials. Grant a task role secretsmanager:GetSecretValue on this ARN
-    rather than copying the password anywhere.
+    credentials. Grant the ECS **task execution role** -- not the task role --
+    secretsmanager:GetSecretValue on this ARN rather than copying the password
+    anywhere.
+
+    The distinction is not pedantic. ECS resolves a container's `secrets`
+    entries itself, before the container starts, using the task execution
+    role; the task role is what the application's own AWS calls use at
+    runtime. Granting the task role instead leaves the injection unauthorised
+    and the task fails to start with a ResourceInitializationError, which
+    reads like a networking fault rather than a permissions one. The ecs
+    module grants it to the execution role for this reason.
 
     The secret's value is a JSON document with `username` and `password`; it
     does not contain a ready-made connection URL. Whatever composes

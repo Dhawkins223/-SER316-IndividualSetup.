@@ -127,6 +127,18 @@ resource "aws_db_instance" "this" {
 
   # RDS generates the password and writes it to a Secrets Manager secret it
   # manages. Terraform never sees it.
+  #
+  # This also means RDS rotates it: "RDS manages the settings for the secret
+  # and rotates the secret every seven days by default." ECS injects secrets
+  # only at task start, so resident tasks keep a password that stops working
+  # about a week after deployment. See the KNOWN GAP section in
+  # docker-entrypoint.sh for the symptom and the three ways to close it; it is
+  # an open decision, not an oversight, and it must be settled before
+  # production traffic moves.
+  #
+  # The alternative -- a Terraform-generated random_password -- is worse on two
+  # counts and was rejected: it puts the password in state as plaintext, and it
+  # replaces weekly rotation with none at all.
   manage_master_user_password   = true
   master_user_secret_kms_key_id = aws_kms_key.this.key_id
 

@@ -4,7 +4,13 @@ set -euo pipefail
 PROJECT="hawknetic-sports-tools"
 AWS_REGION="${AWS_REGION:-us-east-2}"
 REPO="Dhawkins223/HawkNeticSportsTools"
-BRANCH="${MIGRATION_BRANCH:-aws/migration-foundation}"
+# The branch carrying the Terraform stacks this script validates. It is not
+# `aws/migration-foundation` any more: that was the first migration branch and
+# it still exists on the remote, but the current stacks, modules and
+# environments live here. Left pointing at the old branch, the clone path below
+# would fetch a revision without them and validate something the operator never
+# reviewed -- silently, because cloning that branch succeeds.
+BRANCH="${MIGRATION_BRANCH:-claude/hawknetic-aws-migration-f5i1l9}"
 
 echo "=================================================="
 echo " Hawknetic AWS Migration Bootstrap"
@@ -49,6 +55,31 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if REPO_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null)"; then
   echo "Using the checkout this script belongs to: $REPO_ROOT"
   cd "$REPO_ROOT"
+
+  # The clone path below checks out "$BRANCH"; this path has to as well, or the
+  # preferred path is the unguarded one. An operator standing on Master, or on
+  # an older migration branch, would otherwise validate that revision and see
+  # it reported as the migration's Terraform -- the same silent
+  # wrong-revision failure, reached by the route the script actually
+  # recommends.
+  #
+  # This errors rather than checking out. Switching branches under someone who
+  # may have uncommitted work is a destructive act, and this script exists to
+  # verify, not to rearrange a working tree.
+  CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)"
+  echo "Branch: ${CURRENT_BRANCH} ($(git rev-parse --short HEAD 2>/dev/null || echo unknown))"
+
+  if [ "$CURRENT_BRANCH" != "$BRANCH" ]; then
+    echo
+    echo "ERROR: this checkout is on '${CURRENT_BRANCH}', not the migration branch '${BRANCH}'."
+    echo "Validating it would report some other revision's infrastructure as the migration's."
+    echo
+    echo "Either:"
+    echo "  git checkout ${BRANCH}"
+    echo "and re-run, or set MIGRATION_BRANCH to the branch you actually mean:"
+    echo "  MIGRATION_BRANCH=${CURRENT_BRANCH} $0"
+    exit 1
+  fi
 else
   echo "Not inside a checkout; cloning $REPO"
   [ -d "HawkNeticSportsTools/.git" ] || git clone "https://github.com/${REPO}.git"

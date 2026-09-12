@@ -30,6 +30,12 @@ data/secrets/
 **/.terraform/
 *.tfstate
 *.tfstate.*
+
+# Dependency locks belong to root modules, and the three roots (bootstrap, dev,
+# prod) commit theirs. A lock file under modules/ is a by-product of validating
+# that module standalone -- which CI and the bootstrap script both do -- and
+# committing one pins a child module independently of the roots that use it.
+infrastructure/aws/modules/*/.terraform.lock.hcl
 *.tfvars
 !*.tfvars.example
 backend.hcl

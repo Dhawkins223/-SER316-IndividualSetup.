@@ -32,16 +32,19 @@
 # rows the dump never contained. Those are not migration defects, but they look
 # exactly like them. Passing the dump-time baseline compares like with like.
 #
-# The honest limit: the baseline is captured in its own transaction immediately
-# before pg_dump starts, not inside pg_dump's snapshot. A write landing in that
-# gap appears in one and not the other. The gap is seconds against a collector
-# cadence of minutes, so it is unlikely rather than impossible -- and it fails
-# safe, reporting a difference rather than hiding one.
+# The baseline and the dump share one snapshot, so "the same read transaction
+# window" is literal rather than approximate. A third session opens a
+# REPEATABLE READ transaction, exports its snapshot with pg_export_snapshot(),
+# and holds it open; the parity capture adopts it via SET TRANSACTION SNAPSHOT
+# and pg_dump via --snapshot.
 #
-# Closing it properly needs a single exported snapshot shared by both
-# (pg_export_snapshot on a held transaction, passed to pg_dump --snapshot).
-# That is worth doing for the real cutover; for a rehearsal, quiesce the
-# collectors first and the question does not arise.
+# This previously was approximate: the baseline was captured in its own
+# transaction immediately before pg_dump started, and a write landing in the
+# seconds between them appeared in one and not the other. It failed safe --
+# reporting a difference rather than hiding one -- but a cutover gate that
+# reports differences nothing caused is a gate someone learns to override. The
+# source does not need to be quiesced for the comparison to be exact now,
+# though quiescing it is still the right way to run a cutover.
 
 set -euo pipefail
 
@@ -187,6 +190,87 @@ capture_parity() {
 }
 
 # --------------------------------------------------------------------------
+# One read snapshot, shared by the baseline capture and pg_dump
+#
+# Both used to take their own snapshot a second or two apart. On a source still
+# taking writes -- which the Railway collectors are, every few minutes -- a row
+# landing in that gap is in one view and not the other, and the parity run
+# afterwards reports it as a discrepancy no migration caused. Failing safe is
+# better than hiding it, but a gate that cries wolf during a cutover is a gate
+# someone overrides.
+#
+# So a third session opens a REPEATABLE READ transaction, exports its snapshot,
+# and holds the transaction open while the other two adopt it. They then see
+# byte-identical database state no matter what commits meanwhile, and the
+# baseline is exactly what the dump contains.
+# --------------------------------------------------------------------------
+
+SNAPSHOT_ID=""
+SNAPSHOT_PID=""
+SNAPSHOT_DIR=""
+
+snapshot_release() {
+  if [ -n "$SNAPSHOT_PID" ]; then
+    # COMMIT ends the transaction and drops the snapshot; closing fd 9 gives
+    # psql end-of-input so it exits rather than waiting for more commands.
+    printf 'COMMIT;\n' >&9 2>/dev/null || true
+    exec 9>&- 2>/dev/null || true
+    wait "$SNAPSHOT_PID" 2>/dev/null || true
+    SNAPSHOT_PID=""
+  fi
+  if [ -n "$SNAPSHOT_DIR" ]; then
+    rm -rf "$SNAPSHOT_DIR"
+    SNAPSHOT_DIR=""
+  fi
+  SNAPSHOT_ID=""
+}
+
+# Always release, including on the error paths -- an abandoned REPEATABLE READ
+# transaction holds back vacuum on the source for as long as it lives, and the
+# source in this migration is a database that ran out of disk.
+trap snapshot_release EXIT
+
+snapshot_acquire() {
+  local url="$1"
+  SNAPSHOT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/hawknetic-snapshot.XXXXXX")"
+  local fifo="${SNAPSHOT_DIR}/commands"
+  local out="${SNAPSHOT_DIR}/id"
+  local err="${SNAPSHOT_DIR}/err"
+  mkfifo "$fifo"
+
+  PGPASSWORD="$(url_password "$url")" psql "$(url_without_password "$url")" \
+    -X -q -A -t -v ON_ERROR_STOP=1 -f "$fifo" >/dev/null 2>"$err" &
+  SNAPSHOT_PID=$!
+
+  # Read-write rather than write-only: opening a FIFO for writing alone blocks
+  # until a reader arrives, so if psql failed to start this would hang forever
+  # instead of reporting the failure. O_RDWR never blocks, and holding the
+  # descriptor open is also what stops psql seeing EOF between commands.
+  exec 9<>"$fifo"
+
+  # \o sends this one result to a file and the bare \o closes it, so the id is
+  # flushed to disk the moment it exists. Reading it from psql's stdout instead
+  # would depend on stdout buffering, which through a pipe holds the value
+  # until psql exits -- and psql does not exit until the snapshot is released.
+  printf 'BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY;\n\\o %s\nSELECT pg_export_snapshot();\n\\o\n' \
+    "$out" >&9
+
+  local waited=0
+  while [ ! -s "$out" ]; do
+    if ! kill -0 "$SNAPSHOT_PID" 2>/dev/null; then
+      die "the snapshot session exited before exporting a snapshot: $(tail -3 "$err" 2>/dev/null)"
+    fi
+    sleep 0.2
+    waited=$((waited + 1))
+    [ "$waited" -lt 150 ] || die "timed out waiting for pg_export_snapshot()"
+  done
+
+  SNAPSHOT_ID="$(tr -d '[:space:]' < "$out")"
+  [ -n "$SNAPSHOT_ID" ] || die "pg_export_snapshot() returned nothing"
+  log "shared read snapshot: ${SNAPSHOT_ID}"
+}
+
+# --------------------------------------------------------------------------
 
 cmd_dump() {
   require_source
@@ -208,21 +292,32 @@ cmd_dump() {
 
   check_client_version "$SOURCE_DATABASE_URL"
 
+  snapshot_acquire "$SOURCE_DATABASE_URL"
+
   log "capturing the dump-time parity baseline"
-  capture_parity "$SOURCE_DATABASE_URL" "${ARTIFACT_DIR}/source-${stamp}.json" --content-hash
+  capture_parity "$SOURCE_DATABASE_URL" "${ARTIFACT_DIR}/source-${stamp}.json" \
+    --content-hash --snapshot "$SNAPSHOT_ID"
 
   # Custom format: compressed, and restorable selectively with pg_restore.
   # --no-owner/--no-privileges because RDS roles differ from Railway's and a
   # restore that tries to recreate them fails partway through.
   log "dumping (this reads every page, which is also the corruption check)"
+  # --snapshot makes pg_dump adopt the snapshot the holder session exported
+  # rather than taking its own, so this archive and the baseline above are two
+  # views of one instant.
   PGPASSWORD="$(url_password "$SOURCE_DATABASE_URL")" pg_dump \
     --format=custom \
     --compress=9 \
     --no-owner \
     --no-privileges \
+    --snapshot="$SNAPSHOT_ID" \
     --verbose \
     --file="$file" \
     "$(url_without_password "$SOURCE_DATABASE_URL")" 2>&1 | tail -5
+
+  # Release before verifying the archive: the read is done, and the holder's
+  # transaction should not outlive it.
+  snapshot_release
 
   # `pg_restore --list` reads only the table of contents: an archive whose
   # compressed data blocks are truncated or corrupt still lists cleanly. This

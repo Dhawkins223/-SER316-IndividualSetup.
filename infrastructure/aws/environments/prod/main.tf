@@ -414,15 +414,27 @@ module "github_oidc" {
     # change anything: a plan on an untrusted branch is an untrusted execution.
     plan = {
       description = "Terraform plan after merge to Master, gated on the terraform-plan-prod GitHub environment. Read-only."
-      # These must match what the workflow actually mints. The workflow runs on
-      # push to Master inside the `terraform-plan-prod` environment, so a
+      # Exactly one subject, and deliberately so.
+      #
+      # This must match what the workflow actually mints: the plan job runs on
+      # push to Master *inside* the `terraform-plan-prod` environment, and a
+      # job with an environment gets the sub claim
+      # `repo:<owner>/<repo>:environment:terraform-plan-prod`. A
       # `pull_request` subject -- what this trusted when the job still ran on
-      # pull requests -- would leave the role unassumable and the job failing
-      # at credential configuration rather than at anything Terraform did.
-      subjects = [
-        "environment:terraform-plan-prod",
-        "ref:refs/heads/Master",
-      ]
+      # pull requests -- would leave the role unassumable.
+      #
+      # `ref:refs/heads/Master` used to sit alongside it and was a hole rather
+      # than a belt-and-braces second entry. The sub condition is a StringLike
+      # over a list, which AWS evaluates as OR, so the branch subject let *any*
+      # workflow job running on Master assume this role -- no environment, and
+      # therefore none of the required-reviewer protection the environment
+      # exists to enforce. The role carries ReadOnlyAccess over the whole
+      # account plus state-bucket access, so that is an account-wide inventory
+      # read available to anything that can trigger a job on Master.
+      #
+      # Gating on the environment is the entire point; the branch subject
+      # silently opted out of it.
+      subjects            = ["environment:terraform-plan-prod"]
       managed_policy_arns = ["arn:aws:iam::aws:policy/ReadOnlyAccess"]
       inline_policy_json = jsonencode({
         Version = "2012-10-17"

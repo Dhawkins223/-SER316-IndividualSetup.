@@ -6,10 +6,20 @@ and the thing that compares two of them can never drift apart:
 
     --source URL --out FILE     read a database, write a JSON snapshot
     --compare BEFORE AFTER      diff two snapshots, exit non-zero on mismatch
+    --snapshot ID               capture inside a snapshot exported by another
+                                session, so this and a concurrent pg_dump see
+                                one identical database state
 
 The snapshot is what a migration has to preserve: applied migration versions,
-the table inventory, exact row counts, and sequence positions. Everything is
-read through ordinary catalog queries in a read-only transaction.
+the table inventory, exact row counts, row contents, and sequence positions.
+Everything is read through ordinary catalog queries in a read-only transaction.
+
+Not every difference blocks. A target sequence *ahead* of the source is
+reported as an explained note rather than a failure: sequences are exempt from
+MVCC, so pg_dump reads them outside the snapshot it shares with the baseline
+capture, and on a live source it will always read a slightly higher value. A
+sequence *behind* the source does block -- that one can hand a new insert an id
+a restored row already holds.
 
 Row counts come from `count(*)`, not `pg_stat_user_tables.n_live_tup`. The
 statistics view is an estimate refreshed by autovacuum and is routinely wrong
@@ -27,6 +37,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from datetime import datetime, timezone
 from typing import Any
@@ -223,7 +234,20 @@ def _fetch_sequences(conn: psycopg.Connection) -> list[dict[str, Any]]:
     return sequences
 
 
-def capture(url: str, content_hash: bool = False) -> dict[str, Any]:
+# A snapshot id from pg_export_snapshot(), e.g. "00000003-0000001B-1". It is
+# interpolated into SET TRANSACTION SNAPSHOT, which takes a string literal and
+# will not accept a bound parameter, so it is matched against this before it is
+# allowed anywhere near the statement.
+_SNAPSHOT_ID = re.compile(r"\A[0-9A-Fa-f]{8}-[0-9A-Fa-f]{8}-\d+\Z")
+
+
+def capture(url: str, content_hash: bool = False, snapshot: str | None = None) -> dict[str, Any]:
+    if snapshot is not None and not _SNAPSHOT_ID.match(snapshot):
+        raise ValueError(
+            f"refusing to use {snapshot!r} as a snapshot id: expected the "
+            "form pg_export_snapshot() returns, e.g. 00000003-0000001B-1"
+        )
+
     with psycopg.connect(url, connect_timeout=30) as conn:
         conn.read_only = True
         # REPEATABLE READ, not the default READ COMMITTED. Counting 74 tables
@@ -235,6 +259,19 @@ def capture(url: str, content_hash: bool = False) -> dict[str, Any]:
         conn.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ
 
         with conn.cursor() as cur:
+            # Adopt the caller's exported snapshot, if there is one, before
+            # anything else touches this transaction. PostgreSQL rejects SET
+            # TRANSACTION SNAPSHOT once the transaction has run a query, and
+            # the SET statements below are enough to count -- so this has to be
+            # first, not merely early.
+            #
+            # This is what makes the dump-time baseline exact. Without it the
+            # capture and pg_dump each take their own snapshot at slightly
+            # different instants, and any write landing between them shows up
+            # later as a parity discrepancy that no migration caused.
+            if snapshot is not None:
+                cur.execute(f"SET TRANSACTION SNAPSHOT '{snapshot}'")
+
             # Pin every setting that affects how a row renders as text. Without
             # these, two servers with different DateStyle, TimeZone or float
             # precision produce different content hashes for identical data --
@@ -433,18 +470,47 @@ def compare(before: dict[str, Any], after: dict[str, Any]) -> list[dict[str, Any
              "before": None, "after": a_seq[name]["last_value"]}
         )
     for name in sorted(set(b_seq) & set(a_seq)):
-        # A target sequence ahead of the source is safe (no collision); behind
-        # is not. Both are reported, because an unexplained difference is a
-        # difference -- but the detail says which way it leans.
+        # Sequences are not transactional: nextval() is exempt from MVCC, so a
+        # sequence's last_value is NOT covered by the shared snapshot the dump
+        # and the baseline otherwise agree on. pg_dump reads it separately and
+        # therefore later, and on a source still taking writes it will read a
+        # higher value than the baseline did. That difference is manufactured
+        # by the dump process itself, not by the migration.
+        #
+        # Which way it leans is what matters, and the two directions are not
+        # symmetric:
+        #
+        #   target ahead  -- safe. Future ids skip a few values; nothing can
+        #                    collide with a restored row. This is the expected
+        #                    outcome of dumping a live database, so blocking on
+        #                    it would make the gate unusable on exactly the
+        #                    source it exists for.
+        #   target behind -- dangerous. The next insert can allocate an id a
+        #                    restored row already holds. Blocking.
         b_val, a_val = b_seq[name]["last_value"], a_seq[name]["last_value"]
         if b_val != a_val:
-            direction = "behind source" if (a_val or 0) < (b_val or 0) else "ahead of source"
+            behind = (a_val or 0) < (b_val or 0)
             findings.append(
-                {"kind": "sequence_value", "detail": f"{name} is {direction}",
-                 "before": b_val, "after": a_val}
+                {
+                    "kind": "sequence_value",
+                    "severity": "blocking" if behind else "note",
+                    "detail": (
+                        f"{name} is behind source; the next insert can collide "
+                        "with a restored row"
+                        if behind
+                        else f"{name} is ahead of source, which is safe -- "
+                        "sequences are outside the dump's snapshot"
+                    ),
+                    "before": b_val,
+                    "after": a_val,
+                }
             )
 
     return findings
+
+
+def _blocking(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [f for f in findings if f.get("severity") != "note"]
 
 
 def _print_summary(snapshot: dict[str, Any]) -> None:
@@ -488,6 +554,13 @@ def main(argv: list[str] | None = None) -> int:
         metavar=("BEFORE", "AFTER"),
         help="Compare two snapshot files. Exits 1 if they differ.",
     )
+    parser.add_argument(
+        "--snapshot",
+        metavar="ID",
+        help="Read inside a snapshot exported by pg_export_snapshot() in "
+        "another session, so this capture and a concurrent pg_dump see exactly "
+        "the same database state. The exporting transaction must still be open.",
+    )
     args = parser.parse_args(argv)
 
     if args.compare:
@@ -500,12 +573,24 @@ def main(argv: list[str] | None = None) -> int:
         print(f"source: {before['endpoint']}  ({before['totals']['rows']} rows)")
         print(f"target: {after['endpoint']}  ({after['totals']['rows']} rows)")
 
-        if not findings:
+        blocking = _blocking(findings)
+        notes = [f for f in findings if f.get("severity") == "note"]
+
+        # Notes print whether or not anything blocks. They are differences that
+        # are real and explained -- suppressing them would hide the one case
+        # where the explanation turns out not to apply.
+        if notes:
+            print(f"\n{len(notes)} explained difference(s), not blocking:\n")
+            for item in notes:
+                print(f"  [{item['kind']}] {item['detail']}")
+                print(f"      source={item['before']!r}  target={item['after']!r}")
+
+        if not blocking:
             print("\nPARITY OK -- no discrepancies.")
             return 0
 
-        print(f"\nPARITY FAILED -- {len(findings)} discrepancies:\n")
-        for item in findings:
+        print(f"\nPARITY FAILED -- {len(blocking)} discrepancies:\n")
+        for item in blocking:
             print(f"  [{item['kind']}] {item['detail']}")
             print(f"      source={item['before']!r}  target={item['after']!r}")
         print("\nCutover is blocked while any discrepancy is unexplained.")
@@ -515,7 +600,7 @@ def main(argv: list[str] | None = None) -> int:
     if not url:
         parser.error("no database URL: pass --source or set PARITY_DATABASE_URL")
 
-    snapshot = capture(url, content_hash=args.content_hash)
+    snapshot = capture(url, content_hash=args.content_hash, snapshot=args.snapshot)
     print("captured parity snapshot:")
     _print_summary(snapshot)
 

@@ -283,8 +283,18 @@ module "github_oidc" {
 
   roles = {
     deploy = {
-      description = "Build, push and deploy to the dev environment from the default branch."
-      subjects    = ["ref:refs/heads/Master", "environment:development"]
+      description = "Build, push and deploy to the dev environment, gated on the GitHub 'development' environment."
+      # Environment only, not the branch, for the same reason as the prod plan
+      # role: the sub condition is a StringLike over a list and AWS ORs the
+      # entries, so `ref:refs/heads/Master` alongside this would let any job on
+      # Master assume a role that can push images and update ECS services --
+      # bypassing whatever protection the `development` environment carries.
+      #
+      # Nothing depends on the branch subject today: no AWS deploy workflow
+      # exists yet, and the Railway `deploy.yml` uses `environment: production`
+      # and assumes no AWS role. The workflow that eventually uses this must
+      # declare `environment: development`.
+      subjects = ["environment:development"]
       inline_policy_json = jsonencode({
         Version = "2012-10-17"
         Statement = [
