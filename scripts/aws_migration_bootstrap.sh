@@ -20,31 +20,51 @@ REPO="Dhawkins223/HawkNeticSportsTools"
 # branch -- which a branch-name check cannot.
 BRANCH="${MIGRATION_BRANCH:-}"
 
+# Is this directory a Terraform root -- a directory with .tf files directly in
+# it, which is what `terraform -chdir` reads?
+#
+# maxdepth 1, and deliberately. Nested .tf files do not make a root, and a
+# recursive test accepts things the validation loop below then skips: a .tf in
+# some subdirectory that is not a root, or a leftover .terraform/ cache, which
+# for a registry module holds the module's own .tf files and -- being ignored
+# by git -- survives a checkout to a revision that has none of the real ones.
+#
+# This function is the single definition of "has Terraform", used by the guard
+# and by the validation loop. When the two tested different things, the guard
+# could pass on a tree the loop then validated nothing in, and the script
+# reported success having checked nothing.
+has_tf_root() {
+  [ -d "$1" ] && [ -n "$(find "$1" -maxdepth 1 -type f -name '*.tf' -print -quit)" ]
+}
+
 # The stacks this script validates. Their presence is the real precondition:
 # on a checkout without them there is nothing to validate, and proceeding would
 # report some other revision's infrastructure as the migration's.
 require_migration_content() {
   local missing=""
+
   for path in \
     infrastructure/aws/bootstrap \
     infrastructure/aws/environments/dev \
-    infrastructure/aws/environments/prod \
-    infrastructure/aws/modules; do
-    # The directory existing is not enough. If it is present but empty, this
-    # guard passes, the validation loop below skips every directory with no
-    # .tf in it, and the script prints "No Terraform files yet; nothing to
-    # validate" followed by "Bootstrap complete" and exits 0 -- reporting
-    # success having validated nothing, which is the exact silent-success
-    # failure this function exists to prevent.
-    if [ ! -d "$path" ] || [ -z "$(find "$path" -type f -name '*.tf' -print -quit)" ]; then
-      missing="$missing $path"
+    infrastructure/aws/environments/prod; do
+    has_tf_root "$path" || missing="$missing $path"
+  done
+
+  # modules/ is a container with no .tf of its own, so it is satisfied by
+  # holding at least one module that is itself a root -- the same set the
+  # validation loop iterates.
+  local module_roots=0 module
+  for module in infrastructure/aws/modules/*/; do
+    if has_tf_root "$module"; then
+      module_roots=$((module_roots + 1))
     fi
   done
+  [ "$module_roots" -gt 0 ] || missing="$missing infrastructure/aws/modules"
 
   if [ -n "$missing" ]; then
     echo
     echo "ERROR: this checkout has no Terraform to validate."
-    echo "Missing or empty:$missing"
+    echo "Missing or holding no Terraform root:$missing"
     echo
     echo "You are probably on a revision from before the migration work landed."
     echo "Check out the revision carrying it and re-run, for example:"
@@ -115,13 +135,24 @@ if REPO_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null)"; th
   # ones the error message itself suggested.
   if [ -n "$BRANCH" ]; then
     PIN_COMMIT="$(git rev-parse --verify --quiet "${BRANCH}^{commit}" || true)"
+
+    # Fall back to the remote-tracking ref. A pin naming a branch nobody has
+    # checked out locally has no refs/heads entry -- which is the ordinary
+    # state for a branch someone only fetched -- and rejecting it there meant
+    # rejecting a pin whose commit HEAD may already be sitting on.
+    if [ -z "$PIN_COMMIT" ]; then
+      PIN_COMMIT="$(git rev-parse --verify --quiet "origin/${BRANCH}^{commit}" || true)"
+    fi
+
     HEAD_COMMIT="$(git rev-parse --verify HEAD)"
 
     if [ -z "$PIN_COMMIT" ]; then
       echo
-      echo "ERROR: MIGRATION_BRANCH is '${BRANCH}', which this checkout cannot resolve."
-      echo "If it is a branch or tag that exists only on the remote, fetch it first:"
-      echo "  git fetch origin '${BRANCH}'"
+      echo "ERROR: MIGRATION_BRANCH is '${BRANCH}', which this checkout cannot resolve"
+      echo "either locally or as origin/${BRANCH}."
+      echo
+      echo "If it exists on the remote, fetch it and re-run:"
+      echo "  git fetch origin"
       exit 1
     fi
 
@@ -199,35 +230,37 @@ echo "Checking Terraform configuration..."
 # No `terraform plan` here: a plan needs backend configuration and per-
 # environment variables, and this script's job is to verify identity and
 # configuration, not to reach into state.
-if find infrastructure/aws -name '*.tf' -print -quit | grep -q .; then
-  terraform -chdir=infrastructure/aws fmt -check -recursive
+# No "is there any Terraform?" conditional here any more. It was recursive, so
+# a stray .tf under a subdirectory or a .terraform/ cache satisfied it while
+# the loop below validated nothing -- and its else branch then printed "No
+# Terraform files yet; nothing to validate" and let the script exit 0 reporting
+# success. require_migration_content has already proved every root exists, so
+# reaching this point with nothing to validate is not a case to report, it is a
+# contradiction.
+terraform -chdir=infrastructure/aws fmt -check -recursive
 
-  TF_FAILED=0
-  for dir in \
-    infrastructure/aws/bootstrap \
-    infrastructure/aws/environments/* \
-    infrastructure/aws/modules/*; do
-    [ -d "$dir" ] || continue
-    find "$dir" -maxdepth 1 -name '*.tf' -print -quit | grep -q . || continue
+TF_FAILED=0
+for dir in \
+  infrastructure/aws/bootstrap \
+  infrastructure/aws/environments/* \
+  infrastructure/aws/modules/*; do
+  has_tf_root "$dir" || continue
 
-    printf 'validating %s ... ' "$dir"
-    if terraform -chdir="$dir" init -backend=false -input=false >/dev/null 2>&1 \
-       && terraform -chdir="$dir" validate -no-color >/dev/null; then
-      echo "OK"
-    else
-      echo "FAILED"
-      terraform -chdir="$dir" validate -no-color || true
-      TF_FAILED=1
-    fi
-  done
+  printf 'validating %s ... ' "$dir"
+  if terraform -chdir="$dir" init -backend=false -input=false >/dev/null 2>&1 \
+     && terraform -chdir="$dir" validate -no-color >/dev/null; then
+    echo "OK"
+  else
+    echo "FAILED"
+    terraform -chdir="$dir" validate -no-color || true
+    TF_FAILED=1
+  fi
+done
 
-  [ "$TF_FAILED" -eq 0 ] || {
-    echo "ERROR: Terraform validation failed."
-    exit 1
-  }
-else
-  echo "No Terraform files yet; nothing to validate."
-fi
+[ "$TF_FAILED" -eq 0 ] || {
+  echo "ERROR: Terraform validation failed."
+  exit 1
+}
 
 echo
 echo "=================================================="
