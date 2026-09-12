@@ -231,6 +231,8 @@ what actually prevent a repeat; the bucket is a prepared destination.
 | `database-recovery.md` | The live incident, evidence, why it is a disk fault, the forbidden actions, recovery and parity procedure |
 | `service-map.md` | Every Railway service → AWS destination, with cadences from `SERVICE_SPECS` |
 | `cost-model.md` | Line-by-line derivation, budget recommendation, savings levers |
+| `current-inventory.md` | What exists today across Railway, Render and Neon, as measured |
+| `agent-control-plane.md` | Control-plane design: task contract, per-role IAM, concurrency and budget bounds, audit model, build order. Design only — nothing built |
 | `STATUS.md` | This file |
 
 ### CI
@@ -306,8 +308,18 @@ Once AWS authentication exists (blocker 2):
 
 Independent of both:
 
-10. Design the autonomous agent control plane with explicit concurrency and
-    budget bounds (`agent-control-plane.md`, not yet written).
+10. The autonomous agent control plane is **designed** —
+    `agent-control-plane.md` covers the task contract, one IAM role per agent
+    role, the concurrency/budget/iteration/wall-clock bounds, the audit record
+    and the build order. **Nothing is built, and nothing should be built until
+    the migration is stable.** It was written now so the IAM and network
+    boundaries it needs are not foreclosed by migration decisions.
+
+    It carries one recommendation that differs from the brief and needs an
+    owner decision: start with **three** roles, not twenty to thirty. The
+    binding constraint is review capacity, not compute — thirty roles producing
+    output faster than one owner can adjudicate multiplies unreviewed surface
+    area rather than capacity.
 
 ---
 
