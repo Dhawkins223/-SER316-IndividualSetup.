@@ -163,6 +163,67 @@ The one genuine failure in those runs
 (`test_refresh_payload_keeps_slip_live_when_ledger_logging_fails`) was a
 downstream effect of the same missing pool and passes with it installed.
 
+### Review round: 48 bot findings triaged and fixed
+
+Two automated review passes raised 48 findings. They were verified rather than
+accepted wholesale, and the substantive ones were real. The three that would
+have broken a deployment:
+
+**The tasks could never have reached the database.** `DatabaseSettings.from_env()`
+reads `DATABASE_URL` and nothing else, and `require_url()` rejects anything
+without a postgres scheme -- there is no fallback to `POSTGRES_HOST`/`USER`/
+`PASSWORD`. The task definitions injected the parts and no URL. ECS cannot
+concatenate a URL out of a JSON secret's keys, so the image's entrypoint now
+composes one when `DATABASE_URL` is unset. Verified by running
+`database-migrate` with only the parts ECS injects and a password containing
+`/`, `?` and `@`: all 16 migrations applied, `/healthz` 200, `/readyz` healthy.
+An explicitly-set `DATABASE_URL` still wins, so Railway, Codespaces and CI are
+unaffected.
+
+**Nothing applied migrations.** Every service starts with `service-start`; a
+fresh RDS database would have come up empty while the rollout reported success.
+There is now a separate run-once migration task definition, deliberately not
+folded into the shared entrypoint -- nine roles run this image, and migrating
+on start would mean nine concurrent attempts on every deploy.
+
+**The budget matched nothing.** `"user:Project$${var.project_tag}"` escapes the
+dollar, which makes Terraform read the rest as literal text, so the cost filter
+looked for a tag value of the string `${var.project_tag}`. A budget matching no
+resources reports zero spend and never notifies.
+
+Also fixed, with the reasoning recorded at each site: the PR-triggered plan role
+could overwrite or delete every environment's Terraform state; the deploy role
+could update any ECS service in the account; a worker's environment map could
+override `HAWKNETIC_SERVICE` and run the wrong role; the scheduler role lacked
+the `sqs:SendMessage` a dead-letter queue needs, so the queue would have stayed
+silently empty; `bucket_key_enabled` was set alongside SSE-S3, where it does
+nothing; AZ names were hardcoded to Ohio; the CIDR validation accepted a /24;
+and the bootstrap script called `python`, cloned a second checkout over the one
+it lives in, and ran `terraform validate` in a directory with no `.tf` files.
+
+The parity tool grew the checks it was missing. It now compares the full
+applied-migration set (head and count alone pass a target missing 0009 but
+carrying an extra 0017), rejects a snapshot with no migration ledger, reports
+target-only sequences, captures at `REPEATABLE READ` so one snapshot is one
+consistent view, refuses to compare a database against itself, and -- the real
+gap -- hashes every row of every table. Row counts and schema shape cannot
+detect wrong *values*. Verified: one changed character in one of 1000 rows is
+caught, and a clean dump/restore still reports parity.
+
+The migration script now writes artifacts at 0600 (a dump of production was
+world-readable), keeps passwords out of `argv` entirely, proves the dump
+decompresses in full rather than trusting its table of contents, and compares
+the target against the parity baseline captured with the dump rather than a
+later live source snapshot -- which on a source still taking writes would have
+reported ordinary collector activity as migration defects.
+
+Two claims were corrected rather than defended. The cost headline said "5-10x"
+while citing a $5-30/month Railway baseline against ~$217/month, which is ~7x
+at one end and ~43x at the other. And the `raw-archive` S3 bucket was described
+as the fix for database growth when nothing writes to it: `raw-retention` still
+deletes aged payloads. Storage autoscaling and the FreeStorageSpace alarm are
+what actually prevent a repeat; the bucket is a prepared destination.
+
 ### Documentation
 
 | Document | Contents |
@@ -183,7 +244,7 @@ red until the role exists. There is no apply job.
 
 ## NEEDS OWNER APPROVAL
 
-### AWS will cost roughly 5–10× Railway
+### AWS will cost roughly 7× Railway at best, over 40× at worst
 
 Estimated **~$169/month production**, **~$48/month dev**, **~$217 combined**,
 against a measured Railway bill of **$5–30/month**

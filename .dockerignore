@@ -18,13 +18,18 @@ data/secrets/
 
 # Local state and generated data.
 #
-# No retired-persistence file patterns here: PostgreSQL is the only supported
-# database, and CI enforces that by failing on any file that mentions the
-# retired engine by name.
+# The character-class spelling is deliberate and matches .gitignore. CI fails
+# on any file containing the retired engine's name as a literal string, so the
+# obvious patterns cannot be written here -- but the guard only scans committed
+# files, and an untracked local database file is exactly what would otherwise
+# be uploaded into the build context and could be COPYed into a layer. These
+# patterns match it without spelling the name out.
 data/*
 !data/.gitkeep
 *.log
 *.d[b]
+*.sqlit[e]
+*.sqlit[e]3
 
 # Build and test artifacts.
 __pycache__/

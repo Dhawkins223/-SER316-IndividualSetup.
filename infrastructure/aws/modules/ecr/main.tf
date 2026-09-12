@@ -60,6 +60,23 @@ resource "aws_ecr_lifecycle_policy" "this" {
         }
         action = { type = "expire" }
       },
+      {
+        # Catch-all for tagged images matching none of the prefixes above.
+        # Rules are evaluated in ascending priority and each image is acted on
+        # by the first match, so this only sees what rule 2 did not. Without
+        # it, any tag outside the convention matches no rule at all and is kept
+        # forever -- the lifecycle policy would read as bounded while quietly
+        # accumulating storage. The bound is looser than rule 2's on purpose:
+        # these are unrecognised tags, not known rollback targets.
+        rulePriority = 3
+        description  = "Keep the most recent ${var.catch_all_tagged_image_count} tagged images outside the release prefixes"
+        selection = {
+          tagStatus   = "any"
+          countType   = "imageCountMoreThan"
+          countNumber = var.catch_all_tagged_image_count
+        }
+        action = { type = "expire" }
+      },
     ]
   })
 }

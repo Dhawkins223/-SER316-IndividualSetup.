@@ -63,21 +63,30 @@ resource "aws_ecs_task_definition" "worker" {
     image     = var.image
     essential = true
 
+    # Order matters: per-worker overrides are merged BEFORE the two reserved
+    # variables, so a worker cannot override them. They are not settings, they
+    # are what makes this task the worker it claims to be -- a worker map that
+    # set HAWKNETIC_SERVICE would run a different role than its schedule and
+    # log group say, and one that set HAWKNETIC_SERVICE_MODE=loop would turn a
+    # scheduled task into a resident process that never exits.
     environment = [
       for k, v in merge(
         var.common_environment,
+        each.value.environment,
         {
           HAWKNETIC_SERVICE = each.key
           # A scheduled task must exit after one cycle, or it would run until
           # the next schedule fires and defeat the whole arrangement.
           HAWKNETIC_SERVICE_MODE = each.value.mode == "scheduled" ? "once" : "loop"
         },
-        each.value.environment,
       ) : { name = k, value = tostring(v) }
     ]
 
+    # Shared secrets (the database credential) plus whatever this worker
+    # specifically needs. Per-worker entries win on a name collision.
     secrets = [
-      for k, v in var.secret_environment : { name = k, valueFrom = v }
+      for k, v in merge(var.secret_environment, each.value.secret_environment) :
+      { name = k, valueFrom = v }
     ]
 
     logConfiguration = {
@@ -128,9 +137,13 @@ resource "aws_ecs_service" "worker" {
     rollback = true
   }
 
-  # A worker holds a per-cadence idempotency claim, so two of them briefly
-  # overlapping is safe but pointless. Replacing rather than doubling keeps
-  # exactly one collector live.
+  # A worker claims a cadence-bucket idempotency key, so two of them
+  # overlapping *inside the same bucket* deduplicate: the second records
+  # skipped_duplicate. That protection is bucket-scoped, not general -- a loop
+  # cycle that runs long enough to cross a bucket boundary can be joined by a
+  # scheduled run in the next bucket and both will collect. Replacing rather
+  # than doubling keeps exactly one collector live, which is what actually
+  # keeps the overlap window closed here.
   deployment_minimum_healthy_percent = 0
   deployment_maximum_percent         = 100
 
@@ -176,27 +189,38 @@ resource "aws_iam_role_policy" "scheduler" {
 
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Action = ["ecs:RunTask"]
-        # Scoped to this family's revisions only -- ":*" is the revision
-        # wildcard, not a resource wildcard.
-        Resource = [for k, _ in local.scheduled : "${aws_ecs_task_definition.worker[k].arn_without_revision}:*"]
-        Condition = {
-          ArnEquals = { "ecs:cluster" = var.cluster_arn }
-        }
-      },
-      {
-        # RunTask with a task role requires the scheduler to pass both roles.
+    Statement = concat(
+      [
+        {
+          Effect = "Allow"
+          Action = ["ecs:RunTask"]
+          # Scoped to this family's revisions only -- ":*" is the revision
+          # wildcard, not a resource wildcard.
+          Resource = [for k, _ in local.scheduled : "${aws_ecs_task_definition.worker[k].arn_without_revision}:*"]
+          Condition = {
+            ArnEquals = { "ecs:cluster" = var.cluster_arn }
+          }
+        },
+        {
+          # RunTask with a task role requires the scheduler to pass both roles.
+          Effect   = "Allow"
+          Action   = ["iam:PassRole"]
+          Resource = [var.execution_role_arn, var.task_role_arn]
+          Condition = {
+            StringEquals = { "iam:PassedToService" = "ecs-tasks.amazonaws.com" }
+          }
+        },
+      ],
+      # EventBridge Scheduler writes to the dead-letter queue as this role.
+      # Without sqs:SendMessage every DLQ delivery fails with AccessDenied and
+      # the queue stays empty -- hiding exactly the failures it was added to
+      # surface, and doing so silently.
+      var.dead_letter_queue_arn == null ? [] : [{
         Effect   = "Allow"
-        Action   = ["iam:PassRole"]
-        Resource = [var.execution_role_arn, var.task_role_arn]
-        Condition = {
-          StringEquals = { "iam:PassedToService" = "ecs-tasks.amazonaws.com" }
-        }
-      },
-    ]
+        Action   = ["sqs:SendMessage"]
+        Resource = [var.dead_letter_queue_arn]
+      }],
+    )
   })
 }
 
@@ -235,9 +259,10 @@ resource "aws_scheduler_schedule" "worker" {
       }
     }
 
-    # A cycle that fails is retried a couple of times, then left alone: these
-    # workers run again on the next schedule anyway, and a long retry tail
-    # would overlap the following run.
+    # This retries *invocation delivery* -- EventBridge failing to start the
+    # task at all. It does not retry a task that started and exited nonzero;
+    # a failed worker cycle is picked up by the next schedule instead. The
+    # short tail keeps a retry from overlapping that next run.
     retry_policy {
       maximum_retry_attempts       = 2
       maximum_event_age_in_seconds = 600

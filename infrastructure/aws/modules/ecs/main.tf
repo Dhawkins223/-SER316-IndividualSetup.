@@ -349,6 +349,73 @@ resource "aws_ecs_task_definition" "web" {
   tags = var.tags
 }
 
+# --------------------------------------------------------------------------
+# Migration release task
+#
+# A separate, run-once task definition. Nothing in the service definitions
+# applies migrations: the web service and the workers all start with
+# `service-start`, and a fresh RDS database would come up empty while the
+# rollout reported success.
+#
+# Deliberately NOT folded into the shared entrypoint. Nine roles run this one
+# image, so migrating on start would mean nine concurrent migration attempts
+# on every deploy -- the migration code serialises them, but making a scheduled
+# worker's cold start depend on a migration lock is a bad trade for a job that
+# has minutes to live.
+#
+# So it is a deployment step: run this task to completion and check its exit
+# code before updating any service. See infrastructure/aws/README.md.
+resource "aws_ecs_task_definition" "migrate" {
+  family                   = "${var.name_prefix}-migrate"
+  requires_compatibilities = ["FARGATE"]
+  network_mode             = "awsvpc"
+  cpu                      = 256
+  memory                   = 512
+  execution_role_arn       = local.execution_role_arn
+  task_role_arn            = aws_iam_role.task.arn
+
+  runtime_platform {
+    operating_system_family = "LINUX"
+    cpu_architecture        = "X86_64"
+  }
+
+  container_definitions = jsonencode([{
+    name      = "migrate"
+    image     = var.image
+    essential = true
+    command   = ["database-migrate"]
+
+    environment = [
+      for k, v in merge(var.common_environment, {
+        # The default is "check", which reports pending migrations without
+        # applying them. This is the one place that must actually apply.
+        DATABASE_MIGRATION_MODE = "apply"
+      }) : { name = k, value = tostring(v) }
+    ]
+
+    secrets = [
+      for k, v in var.secret_environment : { name = k, valueFrom = v }
+    ]
+
+    logConfiguration = {
+      logDriver = "awslogs"
+      options = {
+        "awslogs-group"         = aws_cloudwatch_log_group.migrate.name
+        "awslogs-region"        = data.aws_region.current.region
+        "awslogs-stream-prefix" = "migrate"
+      }
+    }
+  }])
+
+  tags = merge(var.tags, { Role = "migrate" })
+}
+
+resource "aws_cloudwatch_log_group" "migrate" {
+  name              = "/ecs/${var.name_prefix}/migrate"
+  retention_in_days = var.log_retention_days
+  tags              = var.tags
+}
+
 resource "aws_ecs_service" "web" {
   name            = "${var.name_prefix}-web"
   cluster         = aws_ecs_cluster.this.id
@@ -382,14 +449,54 @@ resource "aws_ecs_service" "web" {
 
   health_check_grace_period_seconds = 60
 
-  # CI deploys new task definition revisions. Without this, every Terraform run
-  # after a deploy would plan to revert the service to the revision Terraform
-  # last knew about.
+  # CI deploys new task definition revisions, so Terraform must not plan to
+  # revert the service to the revision it last knew about.
+  #
+  # desired_count is NOT ignored: nothing else owns it, so ignoring it made
+  # web_desired_count a variable that silently did nothing after the first
+  # apply. If autoscaling is added later, that controller becomes the owner and
+  # desired_count belongs back in this list.
   lifecycle {
-    ignore_changes = [task_definition, desired_count]
+    ignore_changes = [task_definition]
   }
 
   depends_on = [aws_lb_listener.https]
 
   tags = var.tags
+}
+
+# Fargate accepts only specific CPU/memory pairings, and rejects a bad pair at
+# apply with an opaque ClientException. A variable validation cannot see two
+# variables at once, so this is a check block: it reports at plan time, naming
+# the pair and the values that would work.
+check "web_task_size_is_a_valid_fargate_pairing" {
+  assert {
+    condition = contains(
+      lookup(
+        {
+          256  = [512, 1024, 2048]
+          512  = [1024, 2048, 3072, 4096]
+          1024 = [2048, 3072, 4096, 5120, 6144, 7168, 8192]
+          2048 = [4096, 5120, 6144, 7168, 8192, 9216, 10240, 11264, 12288, 13312, 14336, 15360, 16384]
+          4096 = [8192, 9216, 10240, 11264, 12288, 13312, 14336, 15360, 16384, 17408, 18432, 19456, 20480, 21504, 22528, 23552, 24576, 25600, 26624, 27648, 28672, 29696, 30720]
+        },
+        var.web_cpu,
+        [],
+      ),
+      var.web_memory,
+    )
+    error_message = format(
+      "web_cpu=%d with web_memory=%d is not a Fargate pairing. Valid memory for %d CPU: %s.",
+      var.web_cpu,
+      var.web_memory,
+      var.web_cpu,
+      join(", ", [for m in lookup({
+        256  = [512, 1024, 2048]
+        512  = [1024, 2048, 3072, 4096]
+        1024 = [2048, 3072, 4096, 5120, 6144, 7168, 8192]
+        2048 = [4096, 8192, 12288, 16384]
+        4096 = [8192, 16384, 30720]
+      }, var.web_cpu, []) : tostring(m)]),
+    )
+  }
 }

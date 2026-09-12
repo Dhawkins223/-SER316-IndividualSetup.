@@ -62,7 +62,7 @@ variable "web_cpu" {
 }
 
 variable "web_memory" {
-  description = "Fargate memory (MiB) for the web task. Must be a valid pairing with web_cpu; 256 CPU permits 512, 1024 or 2048."
+  description = "Fargate memory (MiB) for the web task. Must be a valid pairing with web_cpu -- enforced by a check block in main.tf, since a variable validation cannot reference another variable."
   type        = number
   default     = 512
 }

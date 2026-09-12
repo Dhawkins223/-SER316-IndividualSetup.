@@ -37,12 +37,13 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "this" {
 
   bucket = aws_s3_bucket.this[each.key].id
 
+  # SSE-S3. No bucket_key_enabled here: an S3 Bucket Key only reduces KMS
+  # request charges, so it is meaningful for SSE-KMS and not for AES256, where
+  # there are no KMS calls to amortise.
   rule {
     apply_server_side_encryption_by_default {
       sse_algorithm = "AES256"
     }
-    # Cuts KMS/S3 request costs on buckets written in bulk; harmless elsewhere.
-    bucket_key_enabled = true
   }
 }
 

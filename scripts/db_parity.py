@@ -112,7 +112,38 @@ def _fetch_migration_state(conn: psycopg.Connection) -> dict[str, Any]:
     return {"found": False, "table": None, "column": None, "count": 0, "latest": None, "applied": []}
 
 
-def _fetch_tables(conn: psycopg.Connection) -> list[dict[str, Any]]:
+def _content_hash(cur: psycopg.Cursor, schema: str, table: str) -> str | None:
+    """Return an order-independent checksum over every row of one table.
+
+    Row counts, sequences and schema shape can all match while the *values*
+    differ -- a restore that silently mangled an encoding or a numeric would
+    pass every other check here. This is the check that looks at the data.
+
+    Each row is rendered to text, hashed, and two 32-bit slices of that hash are
+    summed. Summing rather than concatenating makes the result independent of
+    row order, which matters because a restored table is rarely in the source's
+    physical order, and keeps memory constant: `string_agg` over a table with
+    millions of rows would materialise the whole list.
+
+    The session settings in `capture` are what make `t::text` comparable across
+    two servers; without them a different DateStyle or float precision would
+    produce a different hash for identical data.
+    """
+    cur.execute(
+        f'''
+        SELECT
+            coalesce(sum(('x' || substr(h, 1, 8))::bit(32)::bigint), 0),
+            coalesce(sum(('x' || substr(h, 9, 8))::bit(32)::bigint), 0)
+        FROM (SELECT md5(t.*::text) AS h FROM "{schema}"."{table}" t) s
+        '''
+    )
+    row = cur.fetchone()
+    if row is None:
+        return None
+    return f"{int(row[0]):x}:{int(row[1]):x}"
+
+
+def _fetch_tables(conn: psycopg.Connection, content_hash: bool = False) -> list[dict[str, Any]]:
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -142,15 +173,16 @@ def _fetch_tables(conn: psycopg.Connection) -> list[dict[str, Any]]:
             row = cur.fetchone()
             columns = int(row[0]) if row else 0
 
-            tables.append(
-                {
-                    "schema": schema,
-                    "name": table,
-                    "qualified": f"{schema}.{table}",
-                    "rows": count,
-                    "columns": columns,
-                }
-            )
+            entry: dict[str, Any] = {
+                "schema": schema,
+                "name": table,
+                "qualified": f"{schema}.{table}",
+                "rows": count,
+                "columns": columns,
+            }
+            if content_hash:
+                entry["content_hash"] = _content_hash(cur, schema, table)
+            tables.append(entry)
     return tables
 
 
@@ -191,16 +223,37 @@ def _fetch_sequences(conn: psycopg.Connection) -> list[dict[str, Any]]:
     return sequences
 
 
-def capture(url: str) -> dict[str, Any]:
+def capture(url: str, content_hash: bool = False) -> dict[str, Any]:
     with psycopg.connect(url, connect_timeout=30) as conn:
         conn.read_only = True
+        # REPEATABLE READ, not the default READ COMMITTED. Counting 74 tables
+        # takes many statements, and under READ COMMITTED each one sees a
+        # different committed state -- so a snapshot taken while anything is
+        # writing would record counts that never coexisted, and the diff
+        # against it would report drift that is really just skew. This makes
+        # the whole capture one consistent view.
+        conn.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ
+
         with conn.cursor() as cur:
-            cur.execute("SELECT version(), current_database()")
+            # Pin every setting that affects how a row renders as text. Without
+            # these, two servers with different DateStyle, TimeZone or float
+            # precision produce different content hashes for identical data --
+            # a false discrepancy that would block a correct cutover.
+            cur.execute("SET extra_float_digits = 3")
+            cur.execute("SET DateStyle = 'ISO, YMD'")
+            cur.execute("SET TimeZone = 'UTC'")
+            cur.execute("SET intervalstyle = 'iso_8601'")
+            cur.execute("SET bytea_output = 'hex'")
+
+            cur.execute("SELECT version(), current_database(), inet_server_addr(), inet_server_port()")
             row = cur.fetchone()
-            version, database = (row[0], row[1]) if row else ("unknown", "unknown")
+            if row:
+                version, database, server_addr, server_port = row
+            else:
+                version, database, server_addr, server_port = ("unknown", "unknown", None, None)
 
         migrations = _fetch_migration_state(conn)
-        tables = _fetch_tables(conn)
+        tables = _fetch_tables(conn, content_hash=content_hash)
         sequences = _fetch_sequences(conn)
 
     return {
@@ -209,6 +262,15 @@ def capture(url: str) -> dict[str, Any]:
         "endpoint": redact(url),
         "database": database,
         "server_version": version,
+        # Identity of the server this came from, so a comparison of a database
+        # against itself can be detected and rejected rather than reported as
+        # perfect parity.
+        "server_identity": {
+            "address": str(server_addr) if server_addr is not None else None,
+            "port": int(server_port) if server_port is not None else None,
+            "database": database,
+        },
+        "content_hash": content_hash,
         "migrations": migrations,
         "tables": tables,
         "sequences": sequences,
@@ -228,7 +290,53 @@ def compare(before: dict[str, Any], after: dict[str, Any]) -> list[dict[str, Any
     """Return one entry per discrepancy. Empty list means parity."""
     findings: list[dict[str, Any]] = []
 
+    # Comparing a database against itself passes every check trivially and
+    # proves nothing about a migration. Catch it rather than reporting a
+    # perfect score for a test that never happened.
+    b_id, a_id = before.get("server_identity"), after.get("server_identity")
+    if b_id and a_id and b_id == a_id and b_id.get("database") is not None:
+        findings.append(
+            {
+                "kind": "same_database",
+                "detail": (
+                    "source and target are the same server and database "
+                    f"({b_id.get('address')}:{b_id.get('port')}/{b_id.get('database')}); "
+                    "this comparison proves nothing"
+                ),
+                "before": b_id,
+                "after": a_id,
+            }
+        )
+
+    # A content-hash comparison is only meaningful if both sides computed one.
+    # Silently treating "not computed" as "matches" is the failure mode this
+    # check exists to prevent.
+    if before.get("content_hash") != after.get("content_hash"):
+        findings.append(
+            {
+                "kind": "content_hash_asymmetric",
+                "detail": "one snapshot has content hashes and the other does not; recapture both with --content-hash",
+                "before": before.get("content_hash"),
+                "after": after.get("content_hash"),
+            }
+        )
+
     b_mig, a_mig = before["migrations"], after["migrations"]
+
+    # A snapshot with no recognised migration ledger cannot be compared, and
+    # treating that as parity would pass a database whose migration state is
+    # simply unknown. Fail instead of quietly skipping the check.
+    for label, snapshot in (("source", b_mig), ("target", a_mig)):
+        if not snapshot.get("found"):
+            findings.append(
+                {
+                    "kind": "migration_ledger_missing",
+                    "detail": f"{label} has no recognised migration table; migration state cannot be verified",
+                    "before": b_mig.get("table"),
+                    "after": a_mig.get("table"),
+                }
+            )
+
     if b_mig.get("latest") != a_mig.get("latest"):
         findings.append(
             {
@@ -247,6 +355,33 @@ def compare(before: dict[str, Any], after: dict[str, Any]) -> list[dict[str, Any
                 "after": a_mig.get("count"),
             }
         )
+
+    # Head and count alone do not pin the ledger down: a target missing 0009
+    # but carrying an extra 0017 has the same head and the same count as a
+    # source with 0009 and no 0017. Compare the whole applied set, and name the
+    # specific versions rather than reporting that two lists differ.
+    b_applied, a_applied = set(b_mig.get("applied") or []), set(a_mig.get("applied") or [])
+    if b_applied != a_applied:
+        missing = sorted(b_applied - a_applied)
+        extra = sorted(a_applied - b_applied)
+        if missing:
+            findings.append(
+                {
+                    "kind": "migration_missing",
+                    "detail": "target has not applied migrations present in source: " + ", ".join(missing),
+                    "before": missing,
+                    "after": None,
+                }
+            )
+        if extra:
+            findings.append(
+                {
+                    "kind": "migration_unexpected",
+                    "detail": "target has applied migrations absent from source: " + ", ".join(extra),
+                    "before": None,
+                    "after": extra,
+                }
+            )
 
     b_tables, a_tables = _index(before["tables"]), _index(after["tables"])
     for name in sorted(set(b_tables) - set(a_tables)):
@@ -271,12 +406,29 @@ def compare(before: dict[str, Any], after: dict[str, Any]) -> list[dict[str, Any
                 {"kind": "column_count", "detail": f"{name} column count differs",
                  "before": b_row["columns"], "after": a_row["columns"]}
             )
+        # The only check that looks at row values. Matching counts with a
+        # differing hash means the same number of rows carrying different data.
+        b_hash, a_hash = b_row.get("content_hash"), a_row.get("content_hash")
+        if b_hash is not None and a_hash is not None and b_hash != a_hash:
+            findings.append(
+                {"kind": "content_hash", "detail": f"{name} row contents differ",
+                 "before": b_hash, "after": a_hash}
+            )
 
     b_seq, a_seq = _index(before["sequences"]), _index(after["sequences"])
     for name in sorted(set(b_seq) - set(a_seq)):
         findings.append(
             {"kind": "sequence_missing", "detail": f"{name} absent from target",
              "before": b_seq[name]["last_value"], "after": None}
+        )
+    # Checked in both directions, as tables are. A target-only sequence is
+    # schema drift -- usually a leftover from an earlier restore -- and
+    # omitting this check let the gate pass on a target that was not a faithful
+    # copy.
+    for name in sorted(set(a_seq) - set(b_seq)):
+        findings.append(
+            {"kind": "sequence_unexpected", "detail": f"{name} present only in target",
+             "before": None, "after": a_seq[name]["last_value"]}
         )
     for name in sorted(set(b_seq) & set(a_seq)):
         # A target sequence ahead of the source is safe (no collision); behind
@@ -305,6 +457,10 @@ def _print_summary(snapshot: dict[str, Any]) -> None:
         print(f"  migrations      {mig['count']} applied, head={mig['latest']} ({mig['table']})")
     else:
         print("  migrations      NOT FOUND -- no recognised migration table")
+    if snapshot.get("content_hash"):
+        print("  content hashes  computed for every table")
+    else:
+        print("  content hashes  NOT computed (pass --content-hash to compare row values)")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -317,6 +473,13 @@ def main(argv: list[str] | None = None) -> int:
         "then $DATABASE_URL.",
     )
     parser.add_argument("--out", help="Write the snapshot JSON to this path.")
+    parser.add_argument(
+        "--content-hash",
+        action="store_true",
+        help="Also checksum every row of every table. This is the only check "
+        "that compares row values rather than shape and counts, so a cutover "
+        "gate should use it. It reads every table in full, so it is slower.",
+    )
     parser.add_argument(
         "--compare",
         nargs=2,
@@ -350,7 +513,7 @@ def main(argv: list[str] | None = None) -> int:
     if not url:
         parser.error("no database URL: pass --source or set PARITY_DATABASE_URL")
 
-    snapshot = capture(url)
+    snapshot = capture(url, content_hash=args.content_hash)
     print("captured parity snapshot:")
     _print_summary(snapshot)
 

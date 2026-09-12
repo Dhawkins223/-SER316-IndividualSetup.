@@ -159,10 +159,15 @@ resource "aws_cloudwatch_metric_alarm" "scheduler_failures" {
   count = var.enable_scheduler_alarm ? 1 : 0
 
   alarm_name        = "${var.name_prefix}-scheduler-invocation-failures"
-  alarm_description = "EventBridge Scheduler could not start a scheduled worker task."
+  alarm_description = "EventBridge Scheduler could not start a scheduled worker task. A scheduled task that never starts produces no application logs, so without this the failure is invisible."
 
-  namespace   = "AWS/Scheduler"
-  metric_name = "InvocationAttemptsFailedToBeSentToDeadLetterCount"
+  namespace = "AWS/Scheduler"
+  # TargetErrorCount, not InvocationAttemptsFailedToBeSentToDeadLetterCount.
+  # The latter counts failures to write to a dead-letter queue, so with no DLQ
+  # configured -- the default here -- it can never report anything, and the
+  # alarm would sit green through every failed start. TargetErrorCount counts
+  # the errors themselves and works with or without a DLQ.
+  metric_name = "TargetErrorCount"
   statistic   = "Sum"
   period      = 900
 
@@ -191,9 +196,15 @@ resource "aws_budgets_budget" "monthly" {
   limit_unit   = "USD"
   time_unit    = "MONTHLY"
 
+  # format(), not a template string. AWS's TagKeyValue filter syntax is
+  # "user:<Key>$<Value>", and writing that inline requires escaping the dollar
+  # as "$$" -- which makes Terraform treat the whole "${var.project_tag}" that
+  # follows as literal text, so the filter matched a tag value of the string
+  # "${var.project_tag}" and therefore nothing at all. A budget that matches no
+  # resources reports zero spend and never notifies.
   cost_filter {
     name   = "TagKeyValue"
-    values = ["user:Project$${var.project_tag}"]
+    values = [format("user:Project$%s", var.project_tag)]
   }
 
   dynamic "notification" {

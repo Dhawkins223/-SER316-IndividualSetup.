@@ -59,6 +59,18 @@ variable "roles" {
     condition     = alltrue([for r in var.roles : !contains(r.subjects, "*")])
     error_message = "A bare '*' subject would let any branch, tag, or pull request in the repository assume the role. Name the environment or branch explicitly."
   }
+
+  validation {
+    # IAM accepts 3600-43200 seconds and only whole seconds. Catching it here
+    # names the offending input instead of failing mid-apply on the role.
+    condition = alltrue([
+      for r in var.roles :
+      r.max_session_seconds >= 3600
+      && r.max_session_seconds <= 43200
+      && floor(r.max_session_seconds) == r.max_session_seconds
+    ])
+    error_message = "max_session_seconds must be a whole number of seconds between 3600 and 43200, the range IAM accepts."
+  }
 }
 
 variable "tags" {

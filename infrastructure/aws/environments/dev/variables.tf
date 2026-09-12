@@ -11,9 +11,20 @@ variable "github_repository" {
 }
 
 variable "create_oidc_provider" {
-  description = "Create the GitHub OIDC provider here. It is account-global: if dev and prod share an account, exactly one stack may create it."
+  description = <<-EOT
+    Create the GitHub OIDC provider in this account. It is account-global, so
+    exactly one stack may create it per account.
+
+    Defaults to true because the target design puts dev and prod in separate
+    accounts. The previous default of false, with no existing ARN, made the
+    module's own validation reject the stack before it could plan -- the
+    default configuration was unusable.
+
+    Set false and pass existing_oidc_provider_arn only when dev shares an
+    account with another stack that already created the provider.
+  EOT
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "existing_oidc_provider_arn" {
@@ -42,12 +53,6 @@ variable "rds_engine_version" {
   description = "PostgreSQL version. Verify in-region availability before applying."
   type        = string
   default     = "18.1"
-}
-
-variable "rds_engine_major_version" {
-  description = "Major version for the parameter group family."
-  type        = string
-  default     = "18"
 }
 
 variable "rds_instance_class" {

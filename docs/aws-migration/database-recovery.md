@@ -219,7 +219,7 @@ unreadable block:
 
 ```bash
 pg_dump --schema-only "$DATABASE_URL" > /dev/null   # fast structural check
-pg_dumpall --globals-only "$DATABASE_URL" > globals.sql
+pg_dumpall --globals-only --dbname="$DATABASE_URL" > globals.sql
 ```
 
 `scripts/db_parity.py --source "$DATABASE_URL" --out source.json` captures the
@@ -273,12 +273,19 @@ cycle of every collector at ~166 MB/day against a 5 GB ceiling — roughly a
 change the shape: an always-growing table on a fixed volume, where the pruner
 is itself a database client.
 
-The AWS target must not reproduce it. See `docs/aws-migration/service-map.md`
-and the RDS module: storage autoscaling (`max_allocated_storage`), a
-CloudWatch `FreeStorageSpace` alarm that fires well before the cliff, and
-archival of aged raw payloads to S3 rather than indefinite retention in
-PostgreSQL. Relational operational data stays in PostgreSQL; only the raw
-payload bodies move.
+The AWS target must not reproduce it. Two controls are in place and one is
+only prepared, and the difference matters:
+
+- **In place:** storage autoscaling (`max_allocated_storage`), so RDS grows
+  the volume before it fills; and a CloudWatch `FreeStorageSpace` alarm that
+  fires with room to act. These are what actually prevent a repeat today.
+- **Prepared, not built:** an S3 bucket for aged raw payload bodies, with the
+  task role already granted access. `raw-retention` still *deletes* aged
+  payloads rather than archiving them, so nothing writes to that bucket yet.
+  Making it do so is an application change, not a Terraform one.
+
+Relational operational data stays in PostgreSQL either way; only the raw
+payload bodies would move.
 
 ## 8. Parity procedure (source → RDS)
 

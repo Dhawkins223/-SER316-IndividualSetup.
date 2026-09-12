@@ -5,9 +5,13 @@ one finding the owner needs before approving any spend.
 
 ## Read this first
 
-**AWS will cost roughly 5–10× what Railway costs today, for the same
-workload.** That is not a flaw in the design below — it is what the platforms
-charge.
+**AWS will cost roughly 7× what Railway costs at the top of its measured
+range, and over 40× at the bottom.** That is not a flaw in the design below —
+it is what the platforms charge.
+
+Stated against a single baseline, because a single multiplier cannot describe
+it honestly: the Railway bill is measured as a $5–30/month *range*, and
+~$217/month is ~7× the $30 end but ~43× the $5 end.
 
 `docs/CURRENT_INFRASTRUCTURE.md` measures the current Railway bill at
 **$5–30/month**. The estimate here is **~$169/month for production** and

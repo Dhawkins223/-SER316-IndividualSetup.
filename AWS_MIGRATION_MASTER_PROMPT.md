@@ -85,6 +85,7 @@ Therefore database recovery is the first dependency.
    - KALSHI_ORDER_UPLOAD_ENABLED=false
    - MODEL_PROMOTION_ENABLED=false
    - STALE_CACHE_AS_FRESH=false
+   - DASHBOARD_REQUIRE_AUTH_WHEN_HOSTED=true
 10. Infrastructure must be reproducible as code.
 11. Prefer Terraform unless the repository establishes another accepted standard.
 12. Infrastructure changes follow plan -> review -> apply -> verify.

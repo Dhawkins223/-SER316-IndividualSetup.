@@ -62,3 +62,13 @@ output "web_log_group_name" {
   description = "CloudWatch log group for the web service."
   value       = aws_cloudwatch_log_group.web.name
 }
+
+output "migrate_task_definition_arn" {
+  description = "Run-once task definition that applies database migrations. Deployments must run this to completion and check its exit code before updating any service; nothing else applies migrations."
+  value       = aws_ecs_task_definition.migrate.arn
+}
+
+output "migrate_task_family" {
+  description = "Family name of the migration task definition."
+  value       = aws_ecs_task_definition.migrate.family
+}

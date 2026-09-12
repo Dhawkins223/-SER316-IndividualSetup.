@@ -9,7 +9,11 @@ echo "=================================================="
 echo " Hawknetic AWS Migration Bootstrap"
 echo "=================================================="
 
-for cmd in aws git terraform; do
+# python3 is checked explicitly: the identity parsing below needs it, and many
+# systems (this repository's own sandbox included) have python3 but no `python`.
+# Without this the prerequisite check passed and the script then died on the
+# first parse with set -e.
+for cmd in aws git terraform python3; do
   command -v "$cmd" >/dev/null 2>&1 || {
     echo "ERROR: $cmd is required."
     exit 1
@@ -19,8 +23,8 @@ done
 echo
 echo "Checking AWS identity..."
 IDENTITY="$(aws sts get-caller-identity --output json)"
-ACCOUNT_ID="$(printf '%s' "$IDENTITY" | python -c 'import sys,json; print(json.load(sys.stdin)["Account"])')"
-ARN="$(printf '%s' "$IDENTITY" | python -c 'import sys,json; print(json.load(sys.stdin)["Arn"])')"
+ACCOUNT_ID="$(printf '%s' "$IDENTITY" | python3 -c 'import sys,json; print(json.load(sys.stdin)["Account"])')"
+ARN="$(printf '%s' "$IDENTITY" | python3 -c 'import sys,json; print(json.load(sys.stdin)["Arn"])')"
 
 echo "AWS account: $ACCOUNT_ID"
 echo "AWS principal: $ARN"
@@ -37,14 +41,19 @@ export AWS_DEFAULT_REGION="$AWS_REGION"
 
 echo
 echo "Checking repository..."
-if [ ! -d "HawkNeticSportsTools/.git" ]; then
-  git clone "https://github.com/${REPO}.git"
+# Prefer the checkout this script is part of. Cloning a second copy when the
+# operator is already standing in the repository runs some other revision than
+# the one they reviewed -- and silently, because the clone succeeds.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if REPO_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null)"; then
+  echo "Using the checkout this script belongs to: $REPO_ROOT"
+  cd "$REPO_ROOT"
+else
+  echo "Not inside a checkout; cloning $REPO"
+  [ -d "HawkNeticSportsTools/.git" ] || git clone "https://github.com/${REPO}.git"
+  cd HawkNeticSportsTools
+  git fetch origin
 fi
-
-cd HawkNeticSportsTools
-git fetch origin
-git checkout aws/migration-foundation
-git pull --ff-only origin aws/migration-foundation
 
 mkdir -p   infrastructure/aws/bootstrap   infrastructure/aws/modules/network   infrastructure/aws/modules/ecr   infrastructure/aws/modules/ecs   infrastructure/aws/modules/rds   infrastructure/aws/modules/s3   infrastructure/aws/modules/iam   infrastructure/aws/modules/observability   infrastructure/aws/modules/scheduler   infrastructure/aws/modules/secrets   infrastructure/aws/environments/dev   infrastructure/aws/environments/prod   docs/aws-migration
 
@@ -70,13 +79,42 @@ EOF
 
 echo
 echo "Checking Terraform configuration..."
+# infrastructure/aws is a container directory with no .tf files of its own, so
+# initialising and validating it directly always failed. Each stack and module
+# is its own root and is validated individually, matching the procedure in
+# infrastructure/aws/README.md.
+#
+# No `terraform plan` here: a plan needs backend configuration and per-
+# environment variables, and this script's job is to verify identity and
+# configuration, not to reach into state.
 if find infrastructure/aws -name '*.tf' -print -quit | grep -q .; then
-  terraform -chdir=infrastructure/aws fmt -recursive
-  terraform -chdir=infrastructure/aws init
-  terraform -chdir=infrastructure/aws validate
-  terraform -chdir=infrastructure/aws plan
+  terraform -chdir=infrastructure/aws fmt -check -recursive
+
+  TF_FAILED=0
+  for dir in \
+    infrastructure/aws/bootstrap \
+    infrastructure/aws/environments/* \
+    infrastructure/aws/modules/*; do
+    [ -d "$dir" ] || continue
+    find "$dir" -maxdepth 1 -name '*.tf' -print -quit | grep -q . || continue
+
+    printf 'validating %s ... ' "$dir"
+    if terraform -chdir="$dir" init -backend=false -input=false >/dev/null 2>&1 \
+       && terraform -chdir="$dir" validate -no-color >/dev/null; then
+      echo "OK"
+    else
+      echo "FAILED"
+      terraform -chdir="$dir" validate -no-color || true
+      TF_FAILED=1
+    fi
+  done
+
+  [ "$TF_FAILED" -eq 0 ] || {
+    echo "ERROR: Terraform validation failed."
+    exit 1
+  }
 else
-  echo "No Terraform files yet; no apply attempted."
+  echo "No Terraform files yet; nothing to validate."
 fi
 
 echo

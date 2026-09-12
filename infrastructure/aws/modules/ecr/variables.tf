@@ -28,6 +28,14 @@ variable "untagged_retention_days" {
   description = "Days to keep untagged images. These are usually layers orphaned by a moved tag and are pure cost."
   type        = number
   default     = 7
+
+  validation {
+    # ECR's countNumber must be a positive integer. A fractional or zero value
+    # passes Terraform's number type and is only rejected when the lifecycle
+    # policy is applied, which is a worse place to find out.
+    condition     = var.untagged_retention_days > 0 && floor(var.untagged_retention_days) == var.untagged_retention_days
+    error_message = "untagged_retention_days must be a positive whole number; ECR rejects a fractional countNumber at apply."
+  }
 }
 
 variable "tagged_image_count" {
@@ -36,19 +44,30 @@ variable "tagged_image_count" {
   default     = 20
 
   validation {
-    condition     = var.tagged_image_count >= 5
-    error_message = "Keep at least 5 tagged images so a rollback has somewhere to go."
+    condition     = var.tagged_image_count >= 5 && floor(var.tagged_image_count) == var.tagged_image_count
+    error_message = "tagged_image_count must be a whole number of at least 5, so a rollback has somewhere to go and ECR accepts the countNumber."
   }
 }
 
 variable "retained_tag_prefixes" {
-  description = "Tag prefixes the retention-by-count rule applies to. Must be non-empty: an ECR tagPrefixList rule with no prefixes does not match tagged images."
+  description = "Tag prefixes the keep-recent-releases rule applies to. Tagged images outside these prefixes are caught by a lower-priority catch-all rule rather than accumulating forever."
   type        = list(string)
   default     = ["main", "master", "prod", "sha", "v"]
 
   validation {
     condition     = length(var.retained_tag_prefixes) > 0
     error_message = "retained_tag_prefixes must not be empty, or the keep-recent-releases rule matches nothing."
+  }
+}
+
+variable "catch_all_tagged_image_count" {
+  description = "How many tagged images to keep that match none of retained_tag_prefixes. Without this rule such images match nothing and are never expired, so a stray tag convention quietly accumulates storage."
+  type        = number
+  default     = 50
+
+  validation {
+    condition     = var.catch_all_tagged_image_count >= 1 && floor(var.catch_all_tagged_image_count) == var.catch_all_tagged_image_count
+    error_message = "catch_all_tagged_image_count must be a whole number of at least 1."
   }
 }
 

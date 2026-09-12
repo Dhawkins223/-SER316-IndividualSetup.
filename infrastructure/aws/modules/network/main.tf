@@ -30,8 +30,24 @@
 # Either way RDS stays in the isolated tier and is never reachable from the
 # internet -- that is not what this switch controls.
 
+# Look the zones up rather than hardcoding them. The default list used to be
+# us-east-2a/b/c, which silently produced an invalid configuration the moment
+# `region` was set to anything but Ohio -- the module would try to place
+# subnets in availability zones that do not exist in the selected region.
+# `state = "available"` also skips a zone that is impaired or not open to this
+# account, which a static list cannot.
+data "aws_availability_zones" "available" {
+  state = "available"
+
+  filter {
+    name   = "opt-in-status"
+    values = ["opt-in-not-required"]
+  }
+}
+
 locals {
-  azs = slice(var.availability_zones, 0, var.az_count)
+  available_azs = coalesce(var.availability_zones, data.aws_availability_zones.available.names)
+  azs           = slice(local.available_azs, 0, var.az_count)
 
   # ECS tasks live in private subnets only when NAT exists to serve them.
   task_subnet_ids = var.enable_nat_gateway ? aws_subnet.private[*].id : aws_subnet.public[*].id

@@ -9,20 +9,24 @@ variable "region" {
 }
 
 variable "cidr_block" {
-  description = "VPC CIDR. Must be large enough for three /20 tiers per AZ."
+  description = "VPC CIDR, /16 or larger. Subnets are carved as twelve /4-offset blocks, so a /16 yields the documented /20 tiers."
   type        = string
   default     = "10.40.0.0/16"
 
   validation {
-    condition     = can(cidrsubnet(var.cidr_block, 4, 11))
-    error_message = "cidr_block must support at least 12 /4-offset subnets (a /16 or larger)."
+    # Check the prefix length directly. cidrsubnet(x, 4, 11) succeeds for any
+    # valid CIDR -- netnum 11 is always below 2^4 -- so the obvious can()
+    # version of this validation accepted a /24 and silently produced /28
+    # tiers instead of the /20s the module documents.
+    condition     = can(cidrhost(var.cidr_block, 0)) && tonumber(split("/", var.cidr_block)[1]) <= 16
+    error_message = "cidr_block must be a valid CIDR of /16 or larger; a smaller block yields subnets far below the documented /20 tiers."
   }
 }
 
 variable "availability_zones" {
-  description = "Candidate AZs, in preference order. az_count are taken from the front."
+  description = "Candidate AZs, in preference order. az_count are taken from the front. Leave null to look them up from the configured region -- pass an explicit list only to pin specific zones."
   type        = list(string)
-  default     = ["us-east-2a", "us-east-2b", "us-east-2c"]
+  default     = null
 }
 
 variable "az_count" {

@@ -63,6 +63,12 @@ variable "workers" {
     flex_window_minutes = optional(number, 5)
     enabled             = optional(bool, true)
     environment         = optional(map(string), {})
+    # Secrets only this worker needs, as name => secret ARN, merged over the
+    # module-level secret_environment. Least privilege is the point: the
+    # ingestion collector should get the Kalshi credential and the reporting
+    # worker should not. Every ARN used here must also be readable by the
+    # execution role passed in, or the task fails to start.
+    secret_environment = optional(map(string), {})
   }))
 
   validation {

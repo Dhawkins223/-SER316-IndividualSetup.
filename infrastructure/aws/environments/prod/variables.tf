@@ -67,12 +67,6 @@ variable "rds_engine_version" {
   default     = "18.1"
 }
 
-variable "rds_engine_major_version" {
-  description = "Major version for the parameter group family."
-  type        = string
-  default     = "18"
-}
-
 variable "rds_instance_class" {
   description = "RDS instance class. db.t4g.small is Graviton and a reasonable production floor for this workload; measure before going larger."
   type        = string
@@ -110,9 +104,17 @@ variable "log_retention_days" {
 }
 
 variable "alert_email_addresses" {
-  description = "Addresses for alarm and budget notifications. Each must confirm its SNS subscription by email."
+  description = "Addresses for alarm and budget notifications. Each must confirm its SNS subscription by email before it receives anything."
   type        = list(string)
-  default     = []
+
+  validation {
+    # No default, and at least one required. The RDS free-storage alarm is the
+    # control that would have caught the Railway incident; an alarm publishing
+    # to a topic with no subscribers is indistinguishable from no alarm, and a
+    # default of [] made that the out-of-the-box state for production.
+    condition     = length(var.alert_email_addresses) > 0
+    error_message = "Production requires at least one alert address: the storage alarm this migration exists for must reach someone."
+  }
 }
 
 variable "monthly_budget_usd" {

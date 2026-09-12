@@ -123,11 +123,25 @@ jobs:
     # Skipped until the OIDC role exists. Set the repository variable
     # AWS_PLAN_ROLE_ARN to the plan role's ARN to switch this on; until then a
     # plan job would fail for want of credentials, not for want of correctness.
-    if: vars.AWS_PLAN_ROLE_ARN != ''
+    #
+    # Only on push to Master, never on pull_request. A credentialed plan run
+    # from a pull request executes PR-authored code -- workflow edits, a
+    # Terraform external data source, a provider plugin -- with an AWS session
+    # attached. Even a read-only role then leaks account inventory to anyone who
+    # can open a PR. Planning after merge costs a reviewer the plan output on
+    # the PR and is worth it.
+    if: >-
+      vars.AWS_PLAN_ROLE_ARN != '' &&
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/Master'
     strategy:
       fail-fast: false
       matrix:
         environment: [dev, prod]
+    # A GitHub environment, so the deployment-protection rules configured on it
+    # (required reviewers, branch restrictions) gate minting the OIDC token at
+    # all -- the approval is enforced before AWS is contacted.
+    environment: terraform-plan-${{ matrix.environment }}
     permissions:
       # Required to request the OIDC token. This is what replaces a stored
       # AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY.
@@ -156,8 +170,26 @@ jobs:
             -backend-config="encrypt=true" \
             -backend-config="use_lockfile=true"
 
-      # -lock=false: a plan does not need the state lock, and taking one from a
-      # pull request can block an operator mid-apply.
+      # -lock=false: a plan does not need the state lock, and taking one can
+      # block an operator mid-apply.
+      #
+      # Both environments require `image` and `certificate_arn`, and prod also
+      # requires `state_bucket_arn` and `alert_email_addresses`. Without these
+      # the plan fails on a missing-variable prompt before it plans anything,
+      # so they are wired through repository variables rather than left to be
+      # discovered the first time this job is enabled.
       - name: terraform plan
         working-directory: infrastructure/aws/environments/${{ matrix.environment }}
-        run: terraform plan -input=false -lock=false -no-color
+        env:
+          TF_VAR_image: ${{ vars.TF_VAR_IMAGE }}
+          TF_VAR_certificate_arn: ${{ vars.TF_VAR_CERTIFICATE_ARN }}
+          TF_VAR_state_bucket_arn: ${{ vars.TF_VAR_STATE_BUCKET_ARN }}
+          TF_VAR_alert_email_addresses: ${{ vars.TF_VAR_ALERT_EMAIL_ADDRESSES }}
+        run: |
+          for required in TF_VAR_image TF_VAR_certificate_arn; do
+            if [ -z "${!required}" ]; then
+              echo "::error::${required} is empty. Set the matching repository variable before enabling this job."
+              exit 1
+            fi
+          done
+          terraform plan -input=false -lock=false -no-color

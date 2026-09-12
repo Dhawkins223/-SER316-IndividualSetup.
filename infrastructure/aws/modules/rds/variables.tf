@@ -30,15 +30,9 @@ variable "allowed_security_group_ids" {
 }
 
 variable "engine_version" {
-  description = "PostgreSQL engine version. Verify the minor version is offered in the target region before applying: aws rds describe-db-engine-versions --engine postgres --region us-east-2"
+  description = "PostgreSQL engine version. The parameter group family is derived from its major component, so the two cannot drift apart. Verify the minor version is offered in the target region before applying: aws rds describe-db-engine-versions --engine postgres --region us-east-2"
   type        = string
   default     = "18.1"
-}
-
-variable "engine_major_version" {
-  description = "Major version, used for the parameter group family (postgresNN). Must match engine_version's major."
-  type        = string
-  default     = "18"
 }
 
 variable "instance_class" {

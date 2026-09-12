@@ -34,8 +34,15 @@ resource "aws_secretsmanager_secret" "this" {
 resource "aws_secretsmanager_secret_version" "placeholder" {
   for_each = var.secrets
 
-  secret_id     = aws_secretsmanager_secret.this[each.key].id
-  secret_string = jsonencode({ placeholder = "set-out-of-band" })
+  secret_id = aws_secretsmanager_secret.this[each.key].id
+  # The key name matters. Task definitions select a field with the
+  # "<arn>:<key>::" suffix, so a placeholder document without that key makes
+  # ECS fail to resolve the secret -- and because secret resolution is
+  # all-or-nothing per container, one unset placeholder blocks the whole task,
+  # including the database credentials that were fine. Shipping the expected
+  # key with an obviously-fake value keeps the failure where it belongs: a
+  # login that does not work, not a container that will not start.
+  secret_string = jsonencode({ for key in each.value.keys : key => "set-out-of-band" })
 
   lifecycle {
     ignore_changes = [secret_string, version_stages]

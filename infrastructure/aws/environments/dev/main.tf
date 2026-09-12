@@ -63,7 +63,17 @@ locals {
     DASHBOARD_REQUIRE_AUTH_WHEN_HOSTED = "true"
   }
 
-  common_environment = merge(local.safety_environment, {
+  # See prod/main.tf and docker-entrypoint.sh: the application reads
+  # DATABASE_URL only, and the image composes it from these plus the
+  # RDS-managed credential secret.
+  database_environment = {
+    POSTGRES_HOST    = module.rds.address
+    POSTGRES_PORT    = tostring(module.rds.port)
+    POSTGRES_DB      = module.rds.database_name
+    POSTGRES_SSLMODE = "require"
+  }
+
+  common_environment = merge(local.safety_environment, local.database_environment, {
     APP_ENV            = "development"
     RAW_RETENTION_DAYS = "3"
 
@@ -126,9 +136,9 @@ module "secrets" {
   environment = local.environment
 
   secrets = {
-    "dashboard-auth"   = { description = "Dashboard authentication password", workload = "web" }
-    "kalshi-research"  = { description = "Kalshi API key id and private key", workload = "kalshi-market-ingestion" }
-    "external-sources" = { description = "Odds, SportsData and Firecrawl API keys", workload = "external-source-ingestion" }
+    "dashboard-auth"   = { description = "Dashboard authentication password", workload = "web", keys = ["password"] }
+    "kalshi-research"  = { description = "Kalshi API key id and private key", workload = "kalshi-market-ingestion", keys = ["api_key_id", "private_key"] }
+    "external-sources" = { description = "Odds, SportsData and Firecrawl API keys", workload = "external-source-ingestion", keys = ["odds_api_key", "sportsdata_api_key", "firecrawl_api_key"] }
   }
 
   tags = local.tags
@@ -145,9 +155,8 @@ module "rds" {
 
   allowed_security_group_ids = [module.ecs.task_security_group_id]
 
-  engine_version       = var.rds_engine_version
-  engine_major_version = var.rds_engine_major_version
-  instance_class       = var.rds_instance_class
+  engine_version = var.rds_engine_version
+  instance_class = var.rds_instance_class
 
   allocated_storage     = var.rds_allocated_storage_gb
   max_allocated_storage = var.rds_max_allocated_storage_gb

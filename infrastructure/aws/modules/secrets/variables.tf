@@ -23,7 +23,17 @@ variable "secrets" {
   type = map(object({
     description = string
     workload    = string
+    # JSON keys this secret is expected to carry. Task definitions select a
+    # field with "<arn>:<key>::", so these must match what the environments
+    # reference -- the placeholder document is built from them, and a mismatch
+    # is what makes ECS fail to resolve the secret and block the whole task.
+    keys = list(string)
   }))
+
+  validation {
+    condition     = alltrue([for s in var.secrets : length(s.keys) > 0])
+    error_message = "Every secret must declare at least one key; a placeholder with no keys cannot satisfy a \"<arn>:<key>::\" reference."
+  }
 }
 
 variable "tags" {

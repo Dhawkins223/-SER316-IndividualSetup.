@@ -86,6 +86,8 @@ WORKDIR /app
 # parents[2] of src/kalshi_research_bot/config.py is /app.
 COPY --chown=hawknetic:hawknetic src ./src
 COPY --chown=hawknetic:hawknetic migrations ./migrations
+COPY --chown=hawknetic:hawknetic docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh
 
 # Writable scratch for generated artifacts. On ECS the durable equivalent is
 # S3, not this directory -- anything written here dies with the task, which is
@@ -103,8 +105,14 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD curl -fsS "http://127.0.0.1:${PORT}/healthz" || exit 1
 
-# Exec form, so PID 1 is the Python process and ECS's SIGTERM on task stop
-# reaches the application instead of a shell that ignores it. The worker then
-# gets to finish its transaction inside the stop timeout.
-ENTRYPOINT ["python", "-m", "kalshi_research_bot"]
+# The entrypoint composes DATABASE_URL from its parts when ECS injects the RDS
+# credentials as separate variables, then execs the application -- so PID 1's
+# process slot ends up holding Python and ECS's SIGTERM on task stop reaches it
+# rather than stopping at a shell. The worker then gets to finish its
+# transaction inside the stop timeout.
+#
+# Note CMD no longer repeats "python -m kalshi_research_bot": the entrypoint
+# supplies that, and CMD is only the subcommand. Overriding `command` in a task
+# definition therefore means naming a CLI subcommand, e.g. ["database-migrate"].
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["service-start"]
