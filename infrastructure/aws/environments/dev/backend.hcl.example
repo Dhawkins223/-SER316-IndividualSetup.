@@ -1,0 +1,8 @@
+# Copy to backend.hcl, fill in from the bootstrap stack, then:
+#   terraform init -backend-config=backend.hcl
+
+bucket       = "hawknetic-tfstate-<account-id>"
+key          = "dev/terraform.tfstate"
+region       = "us-east-2"
+encrypt      = true
+use_lockfile = true

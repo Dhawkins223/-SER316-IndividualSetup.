@@ -1,0 +1,226 @@
+name: Terraform
+
+# Validation on every change to the infrastructure workspace, and a plan when
+# AWS credentials are available.
+#
+# The plan job is deliberately conditional. Until the GitHub OIDC role exists
+# in AWS, there is nothing to assume and a plan job would fail on every pull
+# request for a reason unrelated to the change. Validation does not need AWS at
+# all, so it runs unconditionally and is the gate that actually holds today.
+#
+# There is no apply job. Applying infrastructure from CI is a decision the
+# owner has not made, and the migration plan requires a reviewed plan before
+# any apply. Adding one later means adding a job gated on a GitHub environment
+# with required reviewers -- not loosening this file.
+
+on:
+  pull_request:
+    paths:
+      - "infrastructure/**"
+      - ".github/workflows/terraform.yml"
+  push:
+    branches:
+      - Master
+    paths:
+      - "infrastructure/**"
+      - ".github/workflows/terraform.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TF_VERSION: "1.13.1"
+
+jobs:
+  format:
+    name: Format
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: terraform fmt -check
+        run: terraform fmt -check -recursive -diff infrastructure/
+
+  validate:
+    name: Validate ${{ matrix.directory }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      # Report every directory that fails, not just the first. A matrix that
+      # stops at the first failure hides the other three.
+      fail-fast: false
+      matrix:
+        directory:
+          - infrastructure/aws/bootstrap
+          - infrastructure/aws/environments/dev
+          - infrastructure/aws/environments/prod
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      # -backend=false is what makes this work with no AWS credentials: it
+      # initializes providers and modules without contacting the S3 backend.
+      - name: terraform init
+        working-directory: ${{ matrix.directory }}
+        run: terraform init -backend=false -input=false
+
+      - name: terraform validate
+        working-directory: ${{ matrix.directory }}
+        run: terraform validate -no-color
+
+  validate-modules:
+    name: Validate modules
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      # Each module is validated on its own as well as through the
+      # environments. A module only ever exercised via an environment can carry
+      # a broken optional path that nothing instantiates.
+      - name: Validate every module
+        run: |
+          set -uo pipefail
+          failed=0
+          for module in infrastructure/aws/modules/*/; do
+            name="$(basename "$module")"
+            echo "::group::$name"
+            if terraform -chdir="$module" init -backend=false -input=false >/dev/null \
+               && terraform -chdir="$module" validate -no-color; then
+              echo "$name: OK"
+            else
+              echo "::error title=Terraform validate::$name failed validation"
+              failed=1
+            fi
+            echo "::endgroup::"
+          done
+          exit "$failed"
+
+  plan:
+    name: Plan ${{ matrix.environment }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    needs: [format, validate, validate-modules]
+    # Skipped until the OIDC role exists. Set the repository variable
+    # AWS_PLAN_ROLE_ARN to the plan role's ARN to switch this on; until then a
+    # plan job would fail for want of credentials, not for want of correctness.
+    #
+    # Only on push to Master, never on pull_request. A credentialed plan run
+    # from a pull request executes PR-authored code -- workflow edits, a
+    # Terraform external data source, a provider plugin -- with an AWS session
+    # attached. Even a read-only role then leaks account inventory to anyone who
+    # can open a PR. Planning after merge costs a reviewer the plan output on
+    # the PR and is worth it.
+    if: >-
+      vars.AWS_PLAN_ROLE_ARN != '' &&
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/Master'
+    strategy:
+      fail-fast: false
+      matrix:
+        # Production only, because production is the only environment that
+        # defines a plan role.
+        #
+        # A dev leg here would have been red the moment this job was switched
+        # on. A job declaring `environment:` gets the sub claim
+        # `repo:<owner>/<repo>:environment:<name>`, not the branch one, so the
+        # dev leg presents `environment:terraform-plan-dev` -- which the prod
+        # plan role's trust policy does not accept, and there is no dev plan
+        # role for it to use instead. It would have failed at credential
+        # configuration, before Terraform ran, for a reason nothing in the diff
+        # would explain.
+        #
+        # Adding dev back needs three things together, not one: a `plan` role
+        # in environments/dev trusting `environment:terraform-plan-dev` and
+        # scoped to dev's state key, a per-environment role variable (this step
+        # reads a single AWS_PLAN_ROLE_ARN), and a `terraform-plan-dev` GitHub
+        # environment. Doing any one of them alone reproduces exactly this
+        # failure.
+        environment: [prod]
+    # A GitHub environment, so the deployment-protection rules configured on it
+    # (required reviewers, branch restrictions) gate minting the OIDC token at
+    # all -- the approval is enforced before AWS is contacted.
+    environment: terraform-plan-${{ matrix.environment }}
+    permissions:
+      # Required to request the OIDC token. This is what replaces a stored
+      # AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY.
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_PLAN_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-2' }}
+
+      - name: terraform init
+        working-directory: infrastructure/aws/environments/${{ matrix.environment }}
+        run: |
+          if [ -z "${{ vars.TF_STATE_BUCKET }}" ]; then
+            echo "::error::TF_STATE_BUCKET is empty. Set it to the bootstrap stack's state bucket before enabling this job."
+            exit 1
+          fi
+          terraform init -input=false \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="key=${{ matrix.environment }}/terraform.tfstate" \
+            -backend-config="region=${{ vars.AWS_REGION || 'us-east-2' }}" \
+            -backend-config="encrypt=true" \
+            -backend-config="use_lockfile=true"
+
+      # -lock=false: a plan does not need the state lock, and taking one can
+      # block an operator mid-apply.
+      #
+      # Both environments require `image` and `certificate_arn`, and prod also
+      # requires `state_bucket_arn` and `alert_email_addresses`. Without these
+      # the plan fails on a missing-variable prompt before it plans anything,
+      # so they are wired through repository variables rather than left to be
+      # discovered the first time this job is enabled.
+      - name: terraform plan
+        working-directory: infrastructure/aws/environments/${{ matrix.environment }}
+        env:
+          TF_VAR_image: ${{ vars.TF_VAR_IMAGE }}
+          TF_VAR_certificate_arn: ${{ vars.TF_VAR_CERTIFICATE_ARN }}
+          TF_VAR_state_bucket_arn: ${{ vars.TF_VAR_STATE_BUCKET_ARN }}
+          TF_VAR_alert_email_addresses: ${{ vars.TF_VAR_ALERT_EMAIL_ADDRESSES }}
+        run: |
+          required="TF_VAR_image TF_VAR_certificate_arn"
+          # Production takes two more that dev does not, so checking only the
+          # shared pair still let the prod leg fail on a missing-variable prompt
+          # after init rather than up front with a name to fix.
+          if [ "${{ matrix.environment }}" = "prod" ]; then
+            required="$required TF_VAR_state_bucket_arn TF_VAR_alert_email_addresses"
+          fi
+          missing=""
+          for name in $required; do
+            [ -z "${!name}" ] && missing="$missing $name"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::Empty for ${{ matrix.environment }}:$missing. Set the matching repository variables before enabling this job."
+            exit 1
+          fi
+          terraform plan -input=false -lock=false -no-color

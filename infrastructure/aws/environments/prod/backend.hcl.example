@@ -1,0 +1,14 @@
+# Copy to backend.hcl and fill in from the bootstrap stack's outputs, then:
+#   terraform init -backend-config=backend.hcl
+#
+# backend.hcl is gitignored: the bucket name embeds the AWS account id, which
+# is not secret but is not worth publishing either.
+#
+# use_lockfile replaces a DynamoDB lock table with an S3 object lock, which
+# needs Terraform >= 1.11.
+
+bucket       = "hawknetic-tfstate-<account-id>"
+key          = "prod/terraform.tfstate"
+region       = "us-east-2"
+encrypt      = true
+use_lockfile = true
