@@ -137,7 +137,25 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        environment: [dev, prod]
+        # Production only, because production is the only environment that
+        # defines a plan role.
+        #
+        # A dev leg here would have been red the moment this job was switched
+        # on. A job declaring `environment:` gets the sub claim
+        # `repo:<owner>/<repo>:environment:<name>`, not the branch one, so the
+        # dev leg presents `environment:terraform-plan-dev` -- which the prod
+        # plan role's trust policy does not accept, and there is no dev plan
+        # role for it to use instead. It would have failed at credential
+        # configuration, before Terraform ran, for a reason nothing in the diff
+        # would explain.
+        #
+        # Adding dev back needs three things together, not one: a `plan` role
+        # in environments/dev trusting `environment:terraform-plan-dev` and
+        # scoped to dev's state key, a per-environment role variable (this step
+        # reads a single AWS_PLAN_ROLE_ARN), and a `terraform-plan-dev` GitHub
+        # environment. Doing any one of them alone reproduces exactly this
+        # failure.
+        environment: [prod]
     # A GitHub environment, so the deployment-protection rules configured on it
     # (required reviewers, branch restrictions) gate minting the OIDC token at
     # all -- the approval is enforced before AWS is contacted.
