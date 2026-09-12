@@ -1,0 +1,163 @@
+name: Terraform
+
+# Validation on every change to the infrastructure workspace, and a plan when
+# AWS credentials are available.
+#
+# The plan job is deliberately conditional. Until the GitHub OIDC role exists
+# in AWS, there is nothing to assume and a plan job would fail on every pull
+# request for a reason unrelated to the change. Validation does not need AWS at
+# all, so it runs unconditionally and is the gate that actually holds today.
+#
+# There is no apply job. Applying infrastructure from CI is a decision the
+# owner has not made, and the migration plan requires a reviewed plan before
+# any apply. Adding one later means adding a job gated on a GitHub environment
+# with required reviewers -- not loosening this file.
+
+on:
+  pull_request:
+    paths:
+      - "infrastructure/**"
+      - ".github/workflows/terraform.yml"
+  push:
+    branches:
+      - Master
+    paths:
+      - "infrastructure/**"
+      - ".github/workflows/terraform.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TF_VERSION: "1.13.1"
+
+jobs:
+  format:
+    name: Format
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: terraform fmt -check
+        run: terraform fmt -check -recursive -diff infrastructure/
+
+  validate:
+    name: Validate ${{ matrix.directory }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      # Report every directory that fails, not just the first. A matrix that
+      # stops at the first failure hides the other three.
+      fail-fast: false
+      matrix:
+        directory:
+          - infrastructure/aws/bootstrap
+          - infrastructure/aws/environments/dev
+          - infrastructure/aws/environments/prod
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      # -backend=false is what makes this work with no AWS credentials: it
+      # initializes providers and modules without contacting the S3 backend.
+      - name: terraform init
+        working-directory: ${{ matrix.directory }}
+        run: terraform init -backend=false -input=false
+
+      - name: terraform validate
+        working-directory: ${{ matrix.directory }}
+        run: terraform validate -no-color
+
+  validate-modules:
+    name: Validate modules
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      # Each module is validated on its own as well as through the
+      # environments. A module only ever exercised via an environment can carry
+      # a broken optional path that nothing instantiates.
+      - name: Validate every module
+        run: |
+          set -uo pipefail
+          failed=0
+          for module in infrastructure/aws/modules/*/; do
+            name="$(basename "$module")"
+            echo "::group::$name"
+            if terraform -chdir="$module" init -backend=false -input=false >/dev/null \
+               && terraform -chdir="$module" validate -no-color; then
+              echo "$name: OK"
+            else
+              echo "::error title=Terraform validate::$name failed validation"
+              failed=1
+            fi
+            echo "::endgroup::"
+          done
+          exit "$failed"
+
+  plan:
+    name: Plan ${{ matrix.environment }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    needs: [format, validate, validate-modules]
+    # Skipped until the OIDC role exists. Set the repository variable
+    # AWS_PLAN_ROLE_ARN to the plan role's ARN to switch this on; until then a
+    # plan job would fail for want of credentials, not for want of correctness.
+    if: vars.AWS_PLAN_ROLE_ARN != ''
+    strategy:
+      fail-fast: false
+      matrix:
+        environment: [dev, prod]
+    permissions:
+      # Required to request the OIDC token. This is what replaces a stored
+      # AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY.
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_PLAN_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-2' }}
+
+      - name: terraform init
+        working-directory: infrastructure/aws/environments/${{ matrix.environment }}
+        run: |
+          terraform init -input=false \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="key=${{ matrix.environment }}/terraform.tfstate" \
+            -backend-config="region=${{ vars.AWS_REGION || 'us-east-2' }}" \
+            -backend-config="encrypt=true" \
+            -backend-config="use_lockfile=true"
+
+      # -lock=false: a plan does not need the state lock, and taking one from a
+      # pull request can block an operator mid-apply.
+      - name: terraform plan
+        working-directory: infrastructure/aws/environments/${{ matrix.environment }}
+        run: terraform plan -input=false -lock=false -no-color

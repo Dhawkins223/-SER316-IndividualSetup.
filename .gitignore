@@ -24,3 +24,13 @@ data/secrets/
 *.sqlit[e]
 *.sqlit[e]3
 *.d[b]
+
+# Terraform. The provider cache is hundreds of MB and per-directory; state and
+# backend config are environment-specific and may name the AWS account.
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+backend.hcl
+crash.log
