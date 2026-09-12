@@ -194,9 +194,6 @@ module "rds" {
   vpc_id     = module.network.vpc_id
   subnet_ids = module.network.isolated_subnet_ids
 
-  # The only thing allowed to reach 5432. There is no CIDR path.
-  allowed_security_group_ids = [module.ecs.task_security_group_id]
-
   engine_version = var.rds_engine_version
   instance_class = var.rds_instance_class
 
@@ -275,6 +272,23 @@ module "ecs" {
 # --------------------------------------------------------------------------
 # Workers
 # --------------------------------------------------------------------------
+
+# Database ingress, created here rather than inside the rds module.
+#
+# The module still accepts allowed_security_group_ids and still refuses CIDRs,
+# but wiring it from the environment keeps module.rds from depending on
+# module.ecs while module.ecs depends on module.rds. Terraform flattens modules
+# into a resource graph and would likely have coped, but "likely" is not a
+# property to discover during the first production apply -- and a database
+# module that depends on the compute module is backwards layering regardless.
+resource "aws_vpc_security_group_ingress_rule" "tasks_to_database" {
+  security_group_id            = module.rds.security_group_id
+  description                  = "PostgreSQL from the application task security group"
+  referenced_security_group_id = module.ecs.task_security_group_id
+  from_port                    = 5432
+  to_port                      = 5432
+  ip_protocol                  = "tcp"
+}
 
 module "workers" {
   source = "../../modules/scheduler"
@@ -399,8 +413,16 @@ module "github_oidc" {
     # Read-only plan role. Runs on pull requests, so it must not be able to
     # change anything: a plan on an untrusted branch is an untrusted execution.
     plan = {
-      description         = "Terraform plan for pull requests. Read-only."
-      subjects            = ["pull_request"]
+      description = "Terraform plan after merge to Master, gated on the terraform-plan-prod GitHub environment. Read-only."
+      # These must match what the workflow actually mints. The workflow runs on
+      # push to Master inside the `terraform-plan-prod` environment, so a
+      # `pull_request` subject -- what this trusted when the job still ran on
+      # pull requests -- would leave the role unassumable and the job failing
+      # at credential configuration rather than at anything Terraform did.
+      subjects = [
+        "environment:terraform-plan-prod",
+        "ref:refs/heads/Master",
+      ]
       managed_policy_arns = ["arn:aws:iam::aws:policy/ReadOnlyAccess"]
       inline_policy_json = jsonencode({
         Version = "2012-10-17"

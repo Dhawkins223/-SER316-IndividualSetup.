@@ -112,8 +112,10 @@ variable "alert_email_addresses" {
     # control that would have caught the Railway incident; an alarm publishing
     # to a topic with no subscribers is indistinguishable from no alarm, and a
     # default of [] made that the out-of-the-box state for production.
-    condition     = length(var.alert_email_addresses) > 0
-    error_message = "Production requires at least one alert address: the storage alarm this migration exists for must reach someone."
+    condition = length(var.alert_email_addresses) > 0 && alltrue([
+      for address in var.alert_email_addresses : trimspace(address) != ""
+    ])
+    error_message = "Production requires at least one non-blank alert address: the storage alarm this migration exists for must reach someone, and a blank string is not a subscriber."
   }
 }
 

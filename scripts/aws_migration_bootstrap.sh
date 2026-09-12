@@ -4,6 +4,7 @@ set -euo pipefail
 PROJECT="hawknetic-sports-tools"
 AWS_REGION="${AWS_REGION:-us-east-2}"
 REPO="Dhawkins223/HawkNeticSportsTools"
+BRANCH="${MIGRATION_BRANCH:-aws/migration-foundation}"
 
 echo "=================================================="
 echo " Hawknetic AWS Migration Bootstrap"
@@ -53,6 +54,11 @@ else
   [ -d "HawkNeticSportsTools/.git" ] || git clone "https://github.com/${REPO}.git"
   cd HawkNeticSportsTools
   git fetch origin
+  # A fresh clone lands on the default branch. Without this the script would
+  # then validate whatever is on Master rather than the migration branch it
+  # exists to bootstrap.
+  git checkout "$BRANCH"
+  git pull --ff-only origin "$BRANCH"
 fi
 
 mkdir -p   infrastructure/aws/bootstrap   infrastructure/aws/modules/network   infrastructure/aws/modules/ecr   infrastructure/aws/modules/ecs   infrastructure/aws/modules/rds   infrastructure/aws/modules/s3   infrastructure/aws/modules/iam   infrastructure/aws/modules/observability   infrastructure/aws/modules/scheduler   infrastructure/aws/modules/secrets   infrastructure/aws/environments/dev   infrastructure/aws/environments/prod   docs/aws-migration

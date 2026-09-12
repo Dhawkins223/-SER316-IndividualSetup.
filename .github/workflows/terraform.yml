@@ -163,6 +163,10 @@ jobs:
       - name: terraform init
         working-directory: infrastructure/aws/environments/${{ matrix.environment }}
         run: |
+          if [ -z "${{ vars.TF_STATE_BUCKET }}" ]; then
+            echo "::error::TF_STATE_BUCKET is empty. Set it to the bootstrap stack's state bucket before enabling this job."
+            exit 1
+          fi
           terraform init -input=false \
             -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
             -backend-config="key=${{ matrix.environment }}/terraform.tfstate" \
@@ -186,10 +190,19 @@ jobs:
           TF_VAR_state_bucket_arn: ${{ vars.TF_VAR_STATE_BUCKET_ARN }}
           TF_VAR_alert_email_addresses: ${{ vars.TF_VAR_ALERT_EMAIL_ADDRESSES }}
         run: |
-          for required in TF_VAR_image TF_VAR_certificate_arn; do
-            if [ -z "${!required}" ]; then
-              echo "::error::${required} is empty. Set the matching repository variable before enabling this job."
-              exit 1
-            fi
+          required="TF_VAR_image TF_VAR_certificate_arn"
+          # Production takes two more that dev does not, so checking only the
+          # shared pair still let the prod leg fail on a missing-variable prompt
+          # after init rather than up front with a name to fix.
+          if [ "${{ matrix.environment }}" = "prod" ]; then
+            required="$required TF_VAR_state_bucket_arn TF_VAR_alert_email_addresses"
+          fi
+          missing=""
+          for name in $required; do
+            [ -z "${!name}" ] && missing="$missing $name"
           done
+          if [ -n "$missing" ]; then
+            echo "::error::Empty for ${{ matrix.environment }}:$missing. Set the matching repository variables before enabling this job."
+            exit 1
+          fi
           terraform plan -input=false -lock=false -no-color

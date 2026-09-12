@@ -31,6 +31,17 @@
 # time a restore finishes the live source has moved on and the diff reports
 # rows the dump never contained. Those are not migration defects, but they look
 # exactly like them. Passing the dump-time baseline compares like with like.
+#
+# The honest limit: the baseline is captured in its own transaction immediately
+# before pg_dump starts, not inside pg_dump's snapshot. A write landing in that
+# gap appears in one and not the other. The gap is seconds against a collector
+# cadence of minutes, so it is unlikely rather than impossible -- and it fails
+# safe, reporting a difference rather than hiding one.
+#
+# Closing it properly needs a single exported snapshot shared by both
+# (pg_export_snapshot on a held transaction, passed to pg_dump --snapshot).
+# That is worth doing for the real cutover; for a rehearsal, quiesce the
+# collectors first and the question does not arise.
 
 set -euo pipefail
 
@@ -58,6 +69,8 @@ import os
 from urllib.parse import urlsplit, urlunsplit
 p = urlsplit(os.environ["_URL"])
 host = p.hostname or ""
+if ":" in host:
+    host = f"[{host}]"
 if p.port:
     host = f"{host}:{p.port}"
 print(urlunsplit((p.scheme, host, p.path, "", "")))
@@ -73,13 +86,20 @@ PY
 url_without_password() {
   _URL="$1" "$PYTHON" <<'PY'
 import os
-from urllib.parse import urlsplit, urlunsplit, quote
+from urllib.parse import urlsplit, urlunsplit, quote, unquote
 p = urlsplit(os.environ["_URL"])
 netloc = ""
 if p.username:
-    netloc += quote(p.username, safe="")
+    # urlsplit does NOT decode userinfo, so p.username is still percent-encoded.
+    # Quoting it again would turn "us%40er" into "us%2540er" and authentication
+    # would fail. Decode first, then re-encode exactly once.
+    netloc += quote(unquote(p.username), safe="")
     netloc += "@"
-netloc += p.hostname or ""
+# p.hostname lowercases and strips the brackets from an IPv6 literal. Putting
+# them back is required: without them the host/port split is ambiguous and
+# every psql, pg_dump and pg_restore connection fails.
+host = p.hostname or ""
+netloc += f"[{host}]" if ":" in host else host
 if p.port:
     netloc += f":{p.port}"
 print(urlunsplit((p.scheme, netloc, p.path, p.query, "")))
@@ -141,6 +161,21 @@ require_distinct() {
   src="$(server_identity "$SOURCE_DATABASE_URL")" || die "cannot reach the source database"
   tgt="$(server_identity "$TARGET_DATABASE_URL")" || die "cannot reach the target database"
   [ "$src" != "$tgt" ] || die "source and target are the same database ($src); this would prove nothing"
+}
+
+# The same guard, for operations that do not otherwise need the source. If no
+# source is configured or it cannot be reached, there is nothing to collide
+# with and the operation proceeds.
+require_distinct_if_source_available() {
+  [ -n "${SOURCE_DATABASE_URL:-}" ] || return 0
+
+  local src tgt
+  src="$(server_identity "$SOURCE_DATABASE_URL" 2>/dev/null)" || {
+    log "source not reachable; skipping the same-database check"
+    return 0
+  }
+  tgt="$(server_identity "$TARGET_DATABASE_URL")" || die "cannot reach the target database"
+  [ "$src" != "$tgt" ] || die "target is the same database as the source ($src); refusing to restore onto the source"
 }
 
 # db_parity.py reads PARITY_DATABASE_URL from the environment, so the URL stays
@@ -211,10 +246,14 @@ cmd_restore() {
   [ -n "$file" ] || die "usage: $0 restore <dump-file>"
   [ -f "$file" ] || die "no such dump: $file"
 
-  require_source
   require_target
   require_tools
-  require_distinct
+  # Deliberately NOT require_source: a restore reads a dump file and writes the
+  # target. Making the source a live dependency would block exactly the case
+  # this tooling exists for -- the source crash-looping on a full disk while a
+  # dump taken earlier is restored elsewhere. The same-database guard still
+  # applies, but only when a source is configured and reachable.
+  require_distinct_if_source_available
 
   log "target: $(redact "$TARGET_DATABASE_URL")"
 
@@ -286,9 +325,14 @@ cmd_parity() {
 cmd_all() {
   local file baseline
   file="$(cmd_dump | tail -1)"
-  # The baseline written alongside the dump, matched by its timestamp.
-  baseline="${file%.dump}.json"
-  baseline="${baseline/hawknetic-/source-}"
+  # Split directory from basename before substituting. Rewriting the whole path
+  # would rename a directory that happened to contain "hawknetic-" instead of
+  # the dump file, silently miss the baseline, and fall back to a live capture.
+  local dir base
+  dir="$(dirname "$file")"
+  base="$(basename "$file")"
+  baseline="${dir}/source-${base#hawknetic-}"
+  baseline="${baseline%.dump}.json"
   cmd_restore "$file"
   if [ -f "$baseline" ]; then
     cmd_parity "$baseline"

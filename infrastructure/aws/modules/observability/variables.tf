@@ -54,6 +54,12 @@ variable "alb_5xx_threshold" {
   default     = 10
 }
 
+variable "scheduler_group_name" {
+  description = "EventBridge Scheduler group the schedules live in. Used as the alarm dimension; must match the scheduler module's group_name or the alarm watches a series with no data."
+  type        = string
+  default     = "default"
+}
+
 variable "enable_scheduler_alarm" {
   description = "Create the EventBridge Scheduler failure alarm. Only useful when scheduled workers exist."
   type        = bool

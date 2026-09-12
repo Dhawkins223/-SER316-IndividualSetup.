@@ -153,8 +153,6 @@ module "rds" {
   vpc_id     = module.network.vpc_id
   subnet_ids = module.network.isolated_subnet_ids
 
-  allowed_security_group_ids = [module.ecs.task_security_group_id]
-
   engine_version = var.rds_engine_version
   instance_class = var.rds_instance_class
 
@@ -209,6 +207,23 @@ module "ecs" {
   log_retention_days = 7
 
   tags = local.tags
+}
+
+# Database ingress, created here rather than inside the rds module.
+#
+# The module still accepts allowed_security_group_ids and still refuses CIDRs,
+# but wiring it from the environment keeps module.rds from depending on
+# module.ecs while module.ecs depends on module.rds. Terraform flattens modules
+# into a resource graph and would likely have coped, but "likely" is not a
+# property to discover during the first production apply -- and a database
+# module that depends on the compute module is backwards layering regardless.
+resource "aws_vpc_security_group_ingress_rule" "tasks_to_database" {
+  security_group_id            = module.rds.security_group_id
+  description                  = "PostgreSQL from the application task security group"
+  referenced_security_group_id = module.ecs.task_security_group_id
+  from_port                    = 5432
+  to_port                      = 5432
+  ip_protocol                  = "tcp"
 }
 
 module "workers" {

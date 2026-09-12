@@ -31,8 +31,11 @@ variable "secrets" {
   }))
 
   validation {
-    condition     = alltrue([for s in var.secrets : length(s.keys) > 0])
-    error_message = "Every secret must declare at least one key; a placeholder with no keys cannot satisfy a \"<arn>:<key>::\" reference."
+    condition = alltrue([
+      for s in var.secrets :
+      length(s.keys) > 0 && alltrue([for key in s.keys : trimspace(key) != ""])
+    ])
+    error_message = "Every secret must declare at least one non-blank key; a placeholder missing the referenced field makes ECS fail to resolve the secret and blocks the whole task."
   }
 }
 

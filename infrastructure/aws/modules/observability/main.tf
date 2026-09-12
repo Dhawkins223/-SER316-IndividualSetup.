@@ -171,6 +171,12 @@ resource "aws_cloudwatch_metric_alarm" "scheduler_failures" {
   statistic   = "Sum"
   period      = 900
 
+  # EventBridge Scheduler publishes these per schedule group. An alarm with no
+  # dimensions matches only the dimensionless series, which carries no data, so
+  # it would have sat green through every failed start -- the same silence the
+  # previous metric choice produced, for a different reason.
+  dimensions = { ScheduleGroup = var.scheduler_group_name }
+
   comparison_operator = "GreaterThanThreshold"
   threshold           = 0
   evaluation_periods  = 1

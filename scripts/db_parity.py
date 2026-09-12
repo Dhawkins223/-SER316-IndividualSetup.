@@ -310,8 +310,10 @@ def compare(before: dict[str, Any], after: dict[str, Any]) -> list[dict[str, Any
 
     # A content-hash comparison is only meaningful if both sides computed one.
     # Silently treating "not computed" as "matches" is the failure mode this
-    # check exists to prevent.
-    if before.get("content_hash") != after.get("content_hash"):
+    # check exists to prevent. Compared as booleans because a snapshot written
+    # before this flag existed has no such key, and None vs False is not a real
+    # asymmetry.
+    if bool(before.get("content_hash")) != bool(after.get("content_hash")):
         findings.append(
             {
                 "kind": "content_hash_asymmetric",

@@ -469,34 +469,32 @@ resource "aws_ecs_service" "web" {
 # apply with an opaque ClientException. A variable validation cannot see two
 # variables at once, so this is a check block: it reports at plan time, naming
 # the pair and the values that would work.
+#
+# The table lives in a local and is referenced twice. Writing it out twice --
+# once in the condition, once in the message -- is how the first version of
+# this drifted: the message listed a reduced set for 2048 and 4096 CPU and
+# would have told someone that a valid pairing was invalid.
+locals {
+  fargate_memory_by_cpu = {
+    256  = [512, 1024, 2048]
+    512  = [1024, 2048, 3072, 4096]
+    1024 = [2048, 3072, 4096, 5120, 6144, 7168, 8192]
+    2048 = [for gb in range(4, 17) : gb * 1024]
+    4096 = [for gb in range(8, 31) : gb * 1024]
+  }
+
+  fargate_valid_web_memory = lookup(local.fargate_memory_by_cpu, var.web_cpu, [])
+}
+
 check "web_task_size_is_a_valid_fargate_pairing" {
   assert {
-    condition = contains(
-      lookup(
-        {
-          256  = [512, 1024, 2048]
-          512  = [1024, 2048, 3072, 4096]
-          1024 = [2048, 3072, 4096, 5120, 6144, 7168, 8192]
-          2048 = [4096, 5120, 6144, 7168, 8192, 9216, 10240, 11264, 12288, 13312, 14336, 15360, 16384]
-          4096 = [8192, 9216, 10240, 11264, 12288, 13312, 14336, 15360, 16384, 17408, 18432, 19456, 20480, 21504, 22528, 23552, 24576, 25600, 26624, 27648, 28672, 29696, 30720]
-        },
-        var.web_cpu,
-        [],
-      ),
-      var.web_memory,
-    )
+    condition = contains(local.fargate_valid_web_memory, var.web_memory)
     error_message = format(
       "web_cpu=%d with web_memory=%d is not a Fargate pairing. Valid memory for %d CPU: %s.",
       var.web_cpu,
       var.web_memory,
       var.web_cpu,
-      join(", ", [for m in lookup({
-        256  = [512, 1024, 2048]
-        512  = [1024, 2048, 3072, 4096]
-        1024 = [2048, 3072, 4096, 5120, 6144, 7168, 8192]
-        2048 = [4096, 8192, 12288, 16384]
-        4096 = [8192, 16384, 30720]
-      }, var.web_cpu, []) : tostring(m)]),
+      length(local.fargate_valid_web_memory) > 0 ? join(", ", [for m in local.fargate_valid_web_memory : tostring(m)]) : "none -- web_cpu must be one of 256, 512, 1024, 2048, 4096",
     )
   }
 }
