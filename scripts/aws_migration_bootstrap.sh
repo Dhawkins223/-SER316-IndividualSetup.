@@ -4,9 +4,9 @@ set -euo pipefail
 PROJECT="hawknetic-sports-tools"
 AWS_REGION="${AWS_REGION:-us-east-2}"
 REPO="Dhawkins223/HawkNeticSportsTools"
-# Optional. Set MIGRATION_BRANCH to pin this run to a specific revision; leave
-# it unset to use whatever the checkout is on, or the default branch on a fresh
-# clone.
+# Optional. Set MIGRATION_BRANCH to pin this run to a specific revision -- a
+# branch, a tag or a commit -- or leave it unset to use whatever the checkout
+# is on, or the default branch on a fresh clone.
 #
 # It deliberately has no default. A branch name baked in here goes stale the
 # moment the work merges: it named `aws/migration-foundation` while that was
@@ -30,17 +30,25 @@ require_migration_content() {
     infrastructure/aws/environments/dev \
     infrastructure/aws/environments/prod \
     infrastructure/aws/modules; do
-    [ -d "$path" ] || missing="$missing $path"
+    # The directory existing is not enough. If it is present but empty, this
+    # guard passes, the validation loop below skips every directory with no
+    # .tf in it, and the script prints "No Terraform files yet; nothing to
+    # validate" followed by "Bootstrap complete" and exits 0 -- reporting
+    # success having validated nothing, which is the exact silent-success
+    # failure this function exists to prevent.
+    if [ ! -d "$path" ] || [ -z "$(find "$path" -type f -name '*.tf' -print -quit)" ]; then
+      missing="$missing $path"
+    fi
   done
 
   if [ -n "$missing" ]; then
     echo
-    echo "ERROR: this checkout does not contain the migration infrastructure."
-    echo "Missing:$missing"
+    echo "ERROR: this checkout has no Terraform to validate."
+    echo "Missing or empty:$missing"
     echo
     echo "You are probably on a revision from before the migration work landed."
-    echo "Check out the branch or tag carrying it and re-run, for example:"
-    echo "  MIGRATION_BRANCH=<branch> $0"
+    echo "Check out the revision carrying it and re-run, for example:"
+    echo "  MIGRATION_BRANCH=<branch|tag|commit> $0"
     exit 1
   fi
 }
@@ -99,15 +107,35 @@ if REPO_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null)"; th
   # out: switching branches under someone who may have uncommitted work is a
   # destructive act, and this script exists to verify, not to rearrange a
   # working tree.
-  if [ -n "$BRANCH" ] && [ "$CURRENT_BRANCH" != "$BRANCH" ]; then
-    echo
-    echo "ERROR: MIGRATION_BRANCH is '${BRANCH}' but this checkout is on '${CURRENT_BRANCH}'."
-    echo
-    echo "Either check that branch out and re-run:"
-    echo "  git checkout ${BRANCH}"
-    echo "or drop the pin to use the checkout as it stands:"
-    echo "  MIGRATION_BRANCH= $0"
-    exit 1
+  #
+  # Compared as commits, not as names. A pin is documented as taking a branch,
+  # tag or commit, and checking out a tag or a raw commit leaves HEAD detached,
+  # where `git rev-parse --abbrev-ref HEAD` reports the literal string "HEAD".
+  # Comparing names therefore rejected every non-branch pin -- including the
+  # ones the error message itself suggested.
+  if [ -n "$BRANCH" ]; then
+    PIN_COMMIT="$(git rev-parse --verify --quiet "${BRANCH}^{commit}" || true)"
+    HEAD_COMMIT="$(git rev-parse --verify HEAD)"
+
+    if [ -z "$PIN_COMMIT" ]; then
+      echo
+      echo "ERROR: MIGRATION_BRANCH is '${BRANCH}', which this checkout cannot resolve."
+      echo "If it is a branch or tag that exists only on the remote, fetch it first:"
+      echo "  git fetch origin '${BRANCH}'"
+      exit 1
+    fi
+
+    if [ "$PIN_COMMIT" != "$HEAD_COMMIT" ]; then
+      echo
+      echo "ERROR: MIGRATION_BRANCH '${BRANCH}' is $(git rev-parse --short "$PIN_COMMIT"),"
+      echo "but this checkout is at $(git rev-parse --short HEAD) (${CURRENT_BRANCH})."
+      echo
+      echo "Either check the pin out and re-run:"
+      echo "  git checkout ${BRANCH}"
+      echo "or drop the pin to use the checkout as it stands:"
+      echo "  MIGRATION_BRANCH= $0"
+      exit 1
+    fi
   fi
 
   # With no pin, this is what stops an operator on a pre-migration revision
@@ -125,7 +153,12 @@ else
   # migration work has merged. Before that it is not, so a pin moves off it.
   if [ -n "$BRANCH" ]; then
     git checkout "$BRANCH"
-    git pull --ff-only origin "$BRANCH"
+    # Only a branch can be fast-forwarded. Checking out a tag or a commit
+    # leaves HEAD detached with no upstream, and pulling it fails; the pin is
+    # already an exact revision, so there is nothing to fast-forward to.
+    if git show-ref --verify --quiet "refs/heads/${BRANCH}"; then
+      git pull --ff-only origin "$BRANCH"
+    fi
   fi
 
   echo "Branch: $(git rev-parse --abbrev-ref HEAD) ($(git rev-parse --short HEAD))"
