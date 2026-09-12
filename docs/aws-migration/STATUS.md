@@ -144,6 +144,25 @@ Security properties built in rather than documented:
 - Storage autoscaling required by a validation rule that rejects
   `max_allocated_storage == allocated_storage`
 
+### Repository test gate
+
+| Check | Result |
+| --- | --- |
+| `ruff check .` | All checks passed |
+| `./scripts/local.sh test` | **1076 tests, OK**, 117.8 s |
+
+Worth recording because the first three runs did not look like that. They
+reported 310 errors and 1 failure, all `RuntimeError: postgres_pool_unavailable`.
+The cause was not the changes here: `psycopg_pool` was absent from this
+container. Confirmed by running the same suite on a pristine `origin/Master`
+worktree, which produced the identical 310/1 result, and by the fact that no
+commit on this branch touches `src/`, `tests/` or `migrations/`. Installing
+`psycopg_pool>=3.2,<4` turned the suite green.
+
+The one genuine failure in those runs
+(`test_refresh_payload_keeps_slip_live_when_ledger_logging_fails`) was a
+downstream effect of the same missing pool and passes with it installed.
+
 ### Documentation
 
 | Document | Contents |
