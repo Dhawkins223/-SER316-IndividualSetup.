@@ -1,0 +1,53 @@
+# Everything the build context does not need. This is a security control as
+# much as a size one: without it, `.env`, local databases and generated data
+# are uploaded to the Docker daemon and can be COPYed into a layer by mistake.
+
+.git
+.github
+.devcontainer
+.claude
+
+# Secrets and local environment -- never in a build context.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p8
+data/secrets/
+
+# Local state and generated data.
+data/*
+!data/.gitkeep
+*.log
+*.db
+*.sqlite
+*.sqlite3
+
+# Build and test artifacts.
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+*.whl
+.pytest_cache/
+.venv/
+.ruff_cache/
+
+# Not part of the runtime image.
+#
+# migrations/ is deliberately NOT listed: config.repo_path() resolves it from
+# the source tree at runtime, so `database-migrate` needs it in the image.
+tests/
+docs/
+examples/
+scripts/
+infrastructure/
+compose.yml
+Procfile
+nixpacks.toml
+railway.json
+railway.worker.json
+CHANGELOG.md
+AWS_MIGRATION_MASTER_PROMPT.md
